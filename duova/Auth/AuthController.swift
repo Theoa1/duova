@@ -51,9 +51,23 @@ final class AuthController {
     @ObservationIgnored private var failedAttempts = 0
     @ObservationIgnored private var backgroundedAt: Date?
     @ObservationIgnored private let passkeys = PasskeyAuthenticator()
+    /// Duova's account service (Supabase Auth). nil when the backend isn't
+    /// configured, in which case accounts live on this device only.
+    @ObservationIgnored private let cloud: CloudAuthService?
 
-    init(store: SecureStore = .shared) {
+    /// What the server currently allows. Buttons for sign-in methods the server
+    /// hasn't turned on stay hidden.
+    private(set) var capabilities = CloudCapabilities.none
+    /// Passkeys registered to the signed-in account.
+    private(set) var cloudPasskeys: [CloudPasskey] = []
+    /// Set when the lock screen sends someone to reset their password; the
+    /// sign-in screen opens "Forgot password" with this email.
+    @ObservationIgnored private var requestedResetEmail: String?
+
+    /// `usesCloud: false` keeps accounts on this device only (used by previews and tests).
+    init(store: SecureStore = .shared, usesCloud: Bool = true) {
         self.store = store
+        cloud = usesCloud ? CloudAuthService() : nil
         vault = CredentialVault(store: store)
         restoreSession()
         refreshBiometricSignIn()
@@ -68,6 +82,17 @@ final class AuthController {
     }
 
     var biometricKind: BiometricKind { BiometricAuthenticator.availability() }
+
+    /// Accounts are held by Duova's servers (rather than only on this device).
+    var usesCloud: Bool { cloud != nil }
+    var appleSignInAvailable: Bool { cloud == nil || capabilities.apple }
+    /// Passkeys come from the server when it's configured. Signing up with one
+    /// first proves the email with a code, because the server only lets a
+    /// signed-in account add a passkey.
+    var passkeySignInAvailable: Bool { cloud == nil || capabilities.passkeys }
+    var passkeySignUpAvailable: Bool { cloud == nil || capabilities.passkeys }
+    /// Email codes (sign-in, confirmation, password reset) need the server.
+    var emailCodesAvailable: Bool { cloud != nil }
 
     // MARK: Sign in / sign up
 
@@ -85,6 +110,12 @@ final class AuthController {
         isWorking = true
         defer { isWorking = false }
 
+        if let cloud {
+            return try await submitToCloud(
+                cloud, email: normalized, password: password, intent: intent,
+                acceptedTerms: acceptedTerms, rememberWithBiometrics: rememberWithBiometrics)
+        }
+
         let existing = vault.record(forEmail: normalized)
         let outcome: SubmitOutcome
 
@@ -92,7 +123,7 @@ final class AuthController {
         case .signIn:
             guard let record = existing else {
                 registerFailure()
-                throw lockoutError() ?? AuthError.wrongPassword
+                throw lockoutError() ?? AuthError.wrongCredentials
             }
             try await verify(password, against: record)
             guard let found = loadAccounts().first(where: { $0.id == record.accountID }) else {
@@ -127,6 +158,246 @@ final class AuthController {
 
         if rememberWithBiometrics { saveBiometricSignIn(email: normalized, password: password) }
         return outcome
+    }
+
+    /// Email sign-in and sign-up against Supabase Auth. The password is
+    /// checked by the server; a salted local verifier is refreshed from it so
+    /// App Lock's "Use account password" still works offline.
+    private func submitToCloud(
+        _ cloud: CloudAuthService, email: String, password: String, intent: AuthIntent,
+        acceptedTerms: Bool, rememberWithBiometrics: Bool
+    ) async throws -> SubmitOutcome {
+        let outcome: SubmitOutcome
+        switch intent {
+        case .signIn:
+            let user: CloudUser
+            do {
+                user = try await cloud.signIn(email: email, password: password)
+            } catch AuthError.wrongCredentials {
+                registerFailure()
+                throw lockoutError() ?? AuthError.wrongCredentials
+            }
+            failedAttempts = 0
+            let found = try await adopt(user, fallbackEmail: email, password: password)
+            beginSession(for: found)
+            outcome = .signedIn
+
+        case .signUp:
+            guard acceptedTerms else { throw AuthError.termsNotAccepted }
+            if let issue = PasswordPolicy.validate(password, email: email) {
+                throw AuthError.weakPassword(issue)
+            }
+            switch try await cloud.signUp(email: email, password: password) {
+            case .confirmationRequired:
+                return .confirmationSent
+            case .signedIn(let user):
+                let found = try await adopt(user, fallbackEmail: email, password: password)
+                beginSession(for: found)
+                outcome = .created
+            }
+        }
+        if rememberWithBiometrics { saveBiometricSignIn(email: email, password: password) }
+        return outcome
+    }
+
+    // MARK: Email codes
+
+    /// Emails a one-time code for `purpose`.
+    func requestEmailCode(email: String, purpose: EmailCodePurpose, acceptedTerms: Bool = false) async throws {
+        guard let cloud else { throw AuthError.methodNotEnabled }
+        let normalized = EmailNormalizer.normalize(email)
+        guard EmailNormalizer.isValid(normalized) else { throw AuthError.invalidEmail }
+        guard !isWorking else { throw AuthError.busy }
+        isWorking = true
+        defer { isWorking = false }
+
+        switch purpose {
+        case .confirmSignUp:
+            try await cloud.resendSignUpCode(to: normalized)
+        case .signIn:
+            // Same answer whether or not the email has an account.
+            do {
+                try await cloud.sendSignInCode(to: normalized, createAccount: false)
+            } catch AuthError.noAccount {}
+        case .passkeySignUp:
+            guard acceptedTerms else { throw AuthError.termsNotAccepted }
+            guard capabilities.passkeys else { throw AuthError.methodNotEnabled }
+            try await cloud.sendSignInCode(to: normalized, createAccount: true)
+        case .resetPassword:
+            try await cloud.sendPasswordReset(to: normalized)
+        }
+    }
+
+    /// Checks an emailed code and finishes the flow it was sent for. The code
+    /// isn't kept anywhere. `password` is the new password for a reset, or the
+    /// one just chosen when confirming a sign-up.
+    func verifyEmailCode(
+        email: String, code: String, purpose: EmailCodePurpose,
+        password: String? = nil, rememberWithBiometrics: Bool = false
+    ) async throws -> CodeOutcome {
+        guard let cloud else { throw AuthError.methodNotEnabled }
+        let normalized = EmailNormalizer.normalize(email)
+        let digits = code.filter(\.isNumber)
+        guard (6...10).contains(digits.count) else { throw AuthError.codeInvalid }
+        if purpose == .resetPassword {
+            guard let password else { throw AuthError.weakPassword(.tooShort) }
+            if let issue = PasswordPolicy.validate(password, email: normalized) { throw AuthError.weakPassword(issue) }
+        }
+        try ensureNotLockedOut()
+        guard !isWorking else { throw AuthError.busy }
+        isWorking = true
+        defer { isWorking = false }
+
+        let kind: CloudAuthService.CodeKind = switch purpose {
+        case .confirmSignUp: .signUp
+        case .signIn, .passkeySignUp: .signIn
+        case .resetPassword: .recovery
+        }
+        let user: CloudUser
+        do {
+            user = try await cloud.verify(code: digits, email: normalized, kind: kind)
+        } catch AuthError.codeInvalid {
+            registerFailure()
+            throw lockoutError() ?? AuthError.codeInvalid
+        }
+        failedAttempts = 0
+
+        var outcome = CodeOutcome.signedIn
+        switch purpose {
+        case .resetPassword:
+            try await cloud.updatePassword(to: password ?? "")
+        case .passkeySignUp:
+            do {
+                try await cloud.registerPasskey()
+                outcome = .passkeyAdded
+            } catch {
+                outcome = .passkeySkipped
+            }
+        case .confirmSignUp, .signIn:
+            break
+        }
+
+        let savedPassword = purpose == .resetPassword || purpose == .confirmSignUp ? password : nil
+        let found = try await adopt(user, fallbackEmail: normalized, password: savedPassword)
+        beginSession(for: found)
+        if rememberWithBiometrics, let savedPassword {
+            saveBiometricSignIn(email: normalized, password: savedPassword)
+        } else if purpose == .resetPassword {
+            disableBiometricSignIn()
+        }
+        return outcome
+    }
+
+    // MARK: Phone codes
+
+    /// Texts a sign-in code. Off until an SMS provider is set up (`AuthFeatures.phoneCodes`).
+    func requestPhoneCode(phone: String) async throws {
+        guard AuthFeatures.phoneCodes, let cloud else { throw AuthError.methodNotEnabled }
+        let normalized = PhoneNormalizer.normalize(phone)
+        guard PhoneNormalizer.isValid(normalized) else { throw AuthError.invalidPhone }
+        guard !isWorking else { throw AuthError.busy }
+        isWorking = true
+        defer { isWorking = false }
+        try await cloud.sendPhoneCode(to: normalized)
+    }
+
+    func verifyPhoneCode(phone: String, code: String) async throws {
+        guard AuthFeatures.phoneCodes, let cloud else { throw AuthError.methodNotEnabled }
+        let normalized = PhoneNormalizer.normalize(phone)
+        let digits = code.filter(\.isNumber)
+        guard (6...10).contains(digits.count) else { throw AuthError.codeInvalid }
+        try ensureNotLockedOut()
+        guard !isWorking else { throw AuthError.busy }
+        isWorking = true
+        defer { isWorking = false }
+        let user: CloudUser
+        do {
+            user = try await cloud.verifyPhone(code: digits, phone: normalized)
+        } catch AuthError.codeInvalid {
+            registerFailure()
+            throw lockoutError() ?? AuthError.codeInvalid
+        }
+        failedAttempts = 0
+        beginSession(for: try await adopt(user, fallbackEmail: "", password: nil))
+    }
+
+    // MARK: Password for passwordless accounts
+
+    /// Adds a password to an account that signs in with Apple, a passkey or
+    /// email codes. The current session proves who it is.
+    func setPassword(_ new: String) async throws {
+        guard let cloud, let current = account else { throw AuthError.accountUnavailable }
+        guard !current.email.isEmpty else { throw AuthError.methodNotEnabled }
+        if let issue = PasswordPolicy.validate(new, email: current.email) { throw AuthError.weakPassword(issue) }
+        guard !isWorking else { throw AuthError.busy }
+        isWorking = true
+        defer { isWorking = false }
+        try await cloud.updatePassword(to: new)
+        let salt = PasswordHasher.randomSalt()
+        let hash = await PasswordHasher.derive(password: new, salt: salt, iterations: PasswordHasher.iterations)
+        do {
+            try vault.save(
+                CredentialRecord(accountID: current.id, salt: salt, hash: hash, iterations: PasswordHasher.iterations),
+                forEmail: current.email)
+        } catch {
+            throw AuthError.storageFailure
+        }
+        accountHasPassword = true
+    }
+
+    // MARK: Reset from the lock screen
+
+    /// Signs out and opens "Forgot password" for this account's email.
+    func signOutToResetPassword() {
+        requestedResetEmail = account?.email
+        signOut()
+    }
+
+    /// The email the sign-in screen should reset, once.
+    func consumeResetRequest() -> String? {
+        defer { requestedResetEmail = nil }
+        return requestedResetEmail
+    }
+
+    /// Creates or updates the on-device account for a server identity. The
+    /// server's user ID is the local account ID, so one person is one account
+    /// on every device.
+    private func adopt(
+        _ user: CloudUser, fallbackEmail: String, password: String?,
+        fullName: String? = nil, appleUserID: String? = nil
+    ) async throws -> DuovaAccount {
+        let email = EmailNormalizer.normalize(user.email ?? fallbackEmail)
+        var all = loadAccounts()
+        var found: DuovaAccount
+        if let index = all.firstIndex(where: { $0.id == user.id }) {
+            found = all[index]
+            let previous = found.email
+            found.email = email
+            if let appleUserID { found.appleUserID = appleUserID }
+            if previous != email, !previous.isEmpty { vault.remove(forEmail: previous) }
+            all[index] = found
+        } else {
+            let name = (fullName?.isEmpty == false ? fullName : nil)
+                ?? (email.isEmpty ? String(localized: "Duova User") : Self.defaultName(from: email))
+            found = DuovaAccount(
+                id: user.id, email: email, name: name, createdAt: .now,
+                appleUserID: appleUserID, termsAcceptedAt: .now)
+            all.append(found)
+        }
+        do {
+            if let password, !email.isEmpty {
+                let salt = PasswordHasher.randomSalt()
+                let hash = await PasswordHasher.derive(
+                    password: password, salt: salt, iterations: PasswordHasher.iterations)
+                try vault.save(
+                    CredentialRecord(accountID: found.id, salt: salt, hash: hash, iterations: PasswordHasher.iterations),
+                    forEmail: email)
+            }
+            try store.save(all, name: Name.accounts)
+        } catch {
+            throw AuthError.storageFailure
+        }
+        return found
     }
 
     // MARK: Biometric sign-in
@@ -169,20 +440,20 @@ final class AuthController {
             refreshBiometricSignIn()
             return .unavailable
         case .failed:
-            return .failed(String(localized: "\(biometricKind.title) didn't work. Use your password."))
+            return .failed(String(localized: "\(biometricKind.title) failed. Use password."))
         case .data(let sealed):
             guard let plain = try? store.open(sealed, context: "biometric-signin"),
                   let payload = try? JSONDecoder().decode(BiometricPayload.self, from: plain)
             else {
                 disableBiometricSignIn()
-                return .failed(String(localized: "Sign in with your password to set \(biometricKind.title) up again."))
+                return .failed(String(localized: "Use password to reset \(biometricKind.title)."))
             }
             do {
                 _ = try await submit(email: payload.email, password: payload.password, intent: .signIn)
                 return .success
-            } catch AuthError.wrongPassword {
+            } catch AuthError.wrongPassword, AuthError.wrongCredentials {
                 disableBiometricSignIn()
-                return .failed(String(localized: "Your saved sign-in is out of date. Use your password."))
+                return .failed(String(localized: "Saved sign-in outdated. Use password."))
             } catch let error as AuthError {
                 return .failed(error.errorDescription ?? String(localized: "Something went wrong. Try again."))
             } catch {
@@ -196,7 +467,29 @@ final class AuthController {
     /// Completes Sign in with Apple. Apple shares the email and name only the
     /// first time, so a new account is created from them then; afterwards the
     /// stable Apple user ID finds it. Continuing with Apple accepts the Terms.
-    func signInWithApple(userID: String, email: String?, fullName: PersonNameComponents?) throws {
+    func signInWithApple(
+        userID: String, email: String?, fullName: PersonNameComponents?,
+        identityToken: Data?, rawNonce: String
+    ) async throws {
+        guard let cloud else {
+            try signInWithAppleOnDevice(userID: userID, email: email, fullName: fullName)
+            return
+        }
+        guard let identityToken, let token = String(data: identityToken, encoding: .utf8) else {
+            throw AuthError.signInFailed
+        }
+        guard !isWorking else { throw AuthError.busy }
+        isWorking = true
+        defer { isWorking = false }
+        let user = try await cloud.signInWithApple(idToken: token, rawNonce: rawNonce)
+        let formatted = fullName.map { PersonNameComponentsFormatter.localizedString(from: $0, style: .default) } ?? ""
+        let found = try await adopt(
+            user, fallbackEmail: email ?? "", password: nil,
+            fullName: formatted, appleUserID: userID)
+        beginSession(for: found)
+    }
+
+    private func signInWithAppleOnDevice(userID: String, email: String?, fullName: PersonNameComponents?) throws {
         if let link = loadLinks().first(where: { $0.kind == .apple && $0.key == userID }),
            let found = loadAccounts().first(where: { $0.id == link.accountID }) {
             beginSession(for: found)
@@ -245,6 +538,7 @@ final class AuthController {
 
     /// Creates an account protected by a new passkey (no password).
     func signUpWithPasskey(email: String, acceptedTerms: Bool) async throws {
+        guard cloud == nil else { throw AuthError.passkeyUnavailable }
         let normalized = EmailNormalizer.normalize(email)
         guard EmailNormalizer.isValid(normalized) else { throw AuthError.invalidEmail }
         guard acceptedTerms else { throw AuthError.termsNotAccepted }
@@ -280,6 +574,13 @@ final class AuthController {
         isWorking = true
         defer { isWorking = false }
 
+        if let cloud {
+            let user = try await cloud.signInWithPasskey()
+            let found = try await adopt(user, fallbackEmail: "", password: nil)
+            beginSession(for: found)
+            return
+        }
+
         let assertion: PasskeyAuthenticator.Assertion
         do {
             assertion = try await passkeys.assert()
@@ -311,8 +612,98 @@ final class AuthController {
         let result = await BiometricAuthenticator.authenticate(
             reason: String(localized: "Confirm to delete your Duova account."))
         guard result == .success else { return result }
+        await eraseCloudData(for: account)
         eraseAccount(account)
         return .success
+    }
+
+    /// Reloads the signed-in account's passkeys from the server.
+    func refreshPasskeys() async {
+        guard let cloud, account != nil else { cloudPasskeys = []; return }
+        cloudPasskeys = (try? await cloud.passkeys()) ?? cloudPasskeys
+    }
+
+    /// Adds a passkey to the signed-in account.
+    func addPasskey() async throws {
+        guard let cloud, account != nil else { throw AuthError.passkeyUnavailable }
+        try await cloud.registerPasskey()
+        await refreshPasskeys()
+    }
+
+    func removePasskey(_ id: UUID) async throws {
+        guard let cloud else { throw AuthError.passkeyUnavailable }
+        try await cloud.deletePasskey(id)
+        await refreshPasskeys()
+    }
+
+    // MARK: Cloud session
+
+    /// Reads what the server supports, then checks that the stored session is
+    /// still accepted. Offline, the person stays signed in; only a definite
+    /// "this session is gone" from the server signs them out.
+    func verifyCloudSession() async {
+        guard let cloud else { return }
+        capabilities = await cloud.capabilities()
+        guard let current = account else { return }
+        switch await cloud.sessionState() {
+        case .invalid:
+            signOut()
+        case .unknown:
+            break
+        case .valid(let user):
+            guard user.id == current.id else { signOut(); return }
+            await mirrorServerEmail(user, into: current)
+            await refreshPasskeys()
+        }
+    }
+
+    /// An email change completes on the server after the new inbox confirms
+    /// it; follow it here.
+    private func mirrorServerEmail(_ user: CloudUser, into current: DuovaAccount) async {
+        guard let serverEmail = user.email.map(EmailNormalizer.normalize), !serverEmail.isEmpty,
+              serverEmail != current.email else { return }
+        var updated = current
+        updated.email = serverEmail
+        if let record = vault.record(forEmail: current.email) {
+            try? vault.save(record, forEmail: serverEmail)
+            vault.remove(forEmail: current.email)
+        }
+        try? saveAccount(updated)
+        disableBiometricSignIn()
+    }
+
+    // MARK: Private cloud data
+
+    private var privateStore: PrivateDataStore? {
+        DuovaBackend.client.map { PrivateDataStore(client: $0) }
+    }
+
+    private func nameIsCustomized(_ account: DuovaAccount) -> Bool {
+        account.name != Self.defaultName(from: account.email)
+    }
+
+    /// Keeps the display name in step with its encrypted copy in the cloud.
+    /// Runs once this device has the account's keys (`DeviceKeyring`). A name
+    /// this device can't open is never overwritten.
+    func syncPrivateName() async {
+        guard let store = privateStore, let current = account else { return }
+        guard let state = try? await store.displayName(for: current.id) else { return }
+        switch state {
+        case .name(let remote):
+            if remote != current.name, !nameIsCustomized(current) {
+                var updated = current
+                updated.name = remote
+                try? saveAccount(updated)
+            } else if remote != current.name {
+                _ = try? await store.saveDisplayName(current.name, for: current.id)
+            }
+        case .empty:
+            if nameIsCustomized(current) {
+                _ = try? await store.saveDisplayName(current.name, for: current.id)
+            }
+        case .sealedElsewhere:
+            break
+        }
     }
 
     // MARK: Links
@@ -337,13 +728,25 @@ final class AuthController {
     func signOut() {
         store.remove(name: Name.session)
         endSession()
+        if let cloud {
+            cloudPasskeys = []
+            Task { await cloud.signOut() }
+        }
     }
 
     /// Erases the account and everything stored for it. Requires the password.
     func deleteAccount(password: String) async throws {
         guard let account else { throw AuthError.accountUnavailable }
         guard await checkPassword(password) else { throw AuthError.wrongPassword }
+        await eraseCloudData(for: account)
         eraseAccount(account)
+    }
+
+    /// Clears the account's private data from the cloud (and its key from
+    /// this device) while the session is still valid.
+    private func eraseCloudData(for account: DuovaAccount) async {
+        guard cloud != nil, let store = privateStore else { return }
+        _ = await store.eraseAllUserData(for: account.id)
     }
 
     private func eraseAccount(_ account: DuovaAccount) {
@@ -356,6 +759,7 @@ final class AuthController {
         BiometricSignInVault.remove()
         endSession()
         refreshBiometricSignIn()
+        if let cloud { Task { await cloud.signOut() } }
     }
 
     // MARK: App Lock
@@ -426,18 +830,39 @@ final class AuthController {
         let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
         current.name = trimmed.isEmpty ? Self.defaultName(from: current.email) : trimmed
         try saveAccount(current)
+        if let store = privateStore, nameIsCustomized(current) {
+            let id = current.id, saved = current.name
+            Task { _ = try? await store.saveDisplayName(saved, for: id) }
+        }
     }
 
-    func changeEmail(to newEmail: String, password: String) async throws {
+    /// Changes the account email. On Duova's servers the new address must be
+    /// confirmed from its inbox first, so the change finishes later and this
+    /// returns `.confirmationSent`.
+    @discardableResult
+    func changeEmail(to newEmail: String, password: String) async throws -> EmailChangeOutcome {
         guard let current = account else { throw AuthError.accountUnavailable }
         let normalized = EmailNormalizer.normalize(newEmail)
         guard EmailNormalizer.isValid(normalized) else { throw AuthError.invalidEmail }
-        guard normalized != current.email else { return }
-        guard vault.record(forEmail: normalized) == nil else { throw AuthError.emailInUse }
+        guard normalized != current.email else { return .applied }
         try ensureNotLockedOut()
         guard !isWorking else { throw AuthError.busy }
         isWorking = true
         defer { isWorking = false }
+
+        if let cloud {
+            do {
+                try await cloud.verify(email: current.email, password: password)
+            } catch AuthError.wrongCredentials {
+                registerFailure()
+                throw lockoutError() ?? AuthError.wrongPassword
+            }
+            failedAttempts = 0
+            try await cloud.requestEmailChange(to: normalized)
+            return .confirmationSent
+        }
+
+        guard vault.record(forEmail: normalized) == nil else { throw AuthError.emailInUse }
         guard let record = vault.record(forEmail: current.email) else { throw AuthError.accountUnavailable }
         try await verify(password, against: record)
 
@@ -452,6 +877,7 @@ final class AuthController {
             throw AuthError.storageFailure
         }
         disableBiometricSignIn()
+        return .applied
     }
 
     func changePassword(current: String, new: String) async throws {
@@ -461,8 +887,20 @@ final class AuthController {
         guard !isWorking else { throw AuthError.busy }
         isWorking = true
         defer { isWorking = false }
-        guard let record = vault.record(forEmail: account.email) else { throw AuthError.accountUnavailable }
-        try await verify(current, against: record)
+
+        if let cloud {
+            do {
+                try await cloud.verify(email: account.email, password: current)
+            } catch AuthError.wrongCredentials {
+                registerFailure()
+                throw lockoutError() ?? AuthError.wrongPassword
+            }
+            failedAttempts = 0
+            try await cloud.updatePassword(to: new)
+        } else {
+            guard let record = vault.record(forEmail: account.email) else { throw AuthError.accountUnavailable }
+            try await verify(current, against: record)
+        }
 
         let salt = PasswordHasher.randomSalt()
         let hash = await PasswordHasher.derive(password: new, salt: salt, iterations: PasswordHasher.iterations)
@@ -498,7 +936,8 @@ final class AuthController {
     private func restoreSession() {
         guard let session = store.load(SessionRecord.self, name: Name.session),
               let found = loadAccounts().first(where: { $0.id == session.accountID }),
-              vault.record(forEmail: found.email)?.accountID == found.id
+              cloud != nil
+                || vault.record(forEmail: found.email)?.accountID == found.id
                 || loadLinks().contains(where: { $0.accountID == found.id })
         else {
             store.remove(name: Name.session)

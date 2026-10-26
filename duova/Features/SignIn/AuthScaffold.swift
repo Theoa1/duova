@@ -1,13 +1,14 @@
 import SwiftUI
 
 /// The shared full-screen frame for sign in and the lock screen. No cards or
-/// sheets: just the Duova mark and the controls, on the app backdrop.
+/// sheets: just the brand side and the controls, on the app backdrop.
 ///
 /// - **Portrait:** the controls sit low on the screen, within thumb's reach,
-///   running nearly edge to edge. The brand appears here only when
-///   `brandInPortrait` is set.
-/// - **Landscape:** brand on one half, controls on the other.
-/// - **Book arrangement:** the same two halves, one per page.
+///   running edge to edge like the Apps page. The brand appears here only
+///   when `brandInPortrait` is set.
+/// - **Landscape (closed):** brand on one half, controls on the other, unless
+///   `splitsWhenClosed` is off; then the controls fill the screen alone.
+/// - **Book arrangement (open):** brand on one page, controls on the other.
 ///
 /// The controls live in a scroll view and receive its `ScrollViewProxy`, so a
 /// focused field can always be scrolled above the keyboard.
@@ -17,17 +18,20 @@ struct AuthScaffold<Brand: View, Panel: View>: View {
 
     private let brand: Brand
     private let brandInPortrait: Bool
+    private let splitsWhenClosed: Bool
     private let panel: (ScrollViewProxy) -> Panel
 
-    /// Gap between the controls and the screen edges.
-    private let edgeMargin: CGFloat = 12
+    /// Gap between the controls and the screen edges, the same as the Apps page.
+    private let edgeMargin = DuovaMetrics.screenMargin
 
     init(
         brandInPortrait: Bool = true,
+        splitsWhenClosed: Bool = true,
         @ViewBuilder brand: () -> Brand,
         @ViewBuilder panel: @escaping (ScrollViewProxy) -> Panel
     ) {
         self.brandInPortrait = brandInPortrait
+        self.splitsWhenClosed = splitsWhenClosed
         self.brand = brand()
         self.panel = panel
     }
@@ -46,13 +50,14 @@ struct AuthScaffold<Brand: View, Panel: View>: View {
                     } second: {
                         panelPage
                     }
-                } else if isLandscape {
+                } else if isLandscape && splitsWhenClosed {
                     HStack(spacing: 0) {
                         brandPage
                         panelPage
                     }
                 } else {
-                    portrait(height: geo.size.height)
+                    single(height: geo.size.height, showsBrand: brandInPortrait && !isLandscape)
+                        .ignoresSafeArea(.container, edges: .horizontal)
                 }
             }
             .background {
@@ -72,7 +77,6 @@ struct AuthScaffold<Brand: View, Panel: View>: View {
             ScrollViewReader { proxy in
                 ScrollView {
                     panel(proxy)
-                        .frame(maxWidth: 520)
                         .padding(.horizontal, edgeMargin)
                         .padding(.vertical, 16)
                         .frame(maxWidth: .infinity, minHeight: page.size.height)
@@ -84,17 +88,17 @@ struct AuthScaffold<Brand: View, Panel: View>: View {
         }
     }
 
-    private func portrait(height: CGFloat) -> some View {
+    /// One full-screen column, controls low within thumb's reach.
+    private func single(height: CGFloat, showsBrand: Bool) -> some View {
         ScrollViewReader { proxy in
             ScrollView {
                 VStack(spacing: 0) {
                     Spacer(minLength: 16)
-                    if brandInPortrait {
+                    if showsBrand {
                         brand
                         Spacer(minLength: 16)
                     }
                     panel(proxy)
-                        .frame(maxWidth: 520)
                         .padding(.horizontal, edgeMargin)
                         .padding(.bottom, 8)
                 }

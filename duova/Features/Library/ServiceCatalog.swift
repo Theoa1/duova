@@ -127,10 +127,10 @@ enum ServiceID: String, CaseIterable, Identifiable, Hashable {
     case googleMaps
     case tiktok
     case gmail
-    case whatsapp
-    case netflix
+    case excel
+    case twitch
     case googleDocs
-    case uber
+    case googleSlides
 
     var id: String { rawValue }
 }
@@ -163,22 +163,22 @@ enum ServiceCatalog {
                 aliases: ["IG", "Insta"], accent: Color(hex: 0xC7678E), status: .underReview),
         Service(id: .youtube, name: "YouTube", category: .streaming,
                 aliases: ["YT", "Video"], accent: Color(hex: 0xC96A6A), status: .underReview),
-        Service(id: .spotify, name: "Spotify", category: .streaming,
-                aliases: ["Music", "Podcasts"], accent: DuovaPalette.emerald, status: .underReview),
+        Service(id: .excel, name: "Excel", category: .productivity,
+                aliases: ["Spreadsheets", "Sheets", "Microsoft Excel", "Office"], accent: Color(hex: 0x4E9A6E), status: .underReview),
         Service(id: .googleMaps, name: "Google Maps", category: .maps,
                 aliases: ["Maps", "Navigation"], accent: DuovaPalette.teal, status: .underReview),
         Service(id: .tiktok, name: "TikTok", category: .social,
                 aliases: ["Short video"], accent: DuovaPalette.pink, status: .underReview),
+        Service(id: .spotify, name: "Spotify", category: .streaming,
+                aliases: ["Music", "Podcasts"], accent: DuovaPalette.emerald, status: .underReview),
         Service(id: .gmail, name: "Gmail", category: .productivity,
                 aliases: ["Mail", "Email", "Google Mail"], accent: Color(hex: 0xC76B63), status: .underReview),
-        Service(id: .whatsapp, name: "WhatsApp", category: .social,
-                aliases: ["Chat", "Messages"], accent: DuovaPalette.emerald, status: .underReview),
-        Service(id: .netflix, name: "Netflix", category: .streaming,
-                aliases: ["Movies", "Shows"], accent: Color(hex: 0xB85A60), status: .underReview),
+        Service(id: .twitch, name: "Twitch", category: .streaming,
+                aliases: ["Live", "Streams", "Gaming"], accent: Color(hex: 0x8B6BD9), status: .underReview),
         Service(id: .googleDocs, name: "Google Docs", category: .productivity,
                 aliases: ["Docs", "Documents"], accent: DuovaPalette.blue, status: .underReview),
-        Service(id: .uber, name: "Uber", category: .maps,
-                aliases: ["Rides", "Taxi"], accent: DuovaPalette.indigo, status: .underReview)
+        Service(id: .googleSlides, name: "Google Slides", category: .productivity,
+                aliases: ["Slides", "Presentations", "Decks"], accent: Color(hex: 0xD9A441), status: .underReview)
     ]
 
     static func service(_ id: ServiceID) -> Service {

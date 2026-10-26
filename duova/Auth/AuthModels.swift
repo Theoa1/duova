@@ -14,7 +14,8 @@ struct DuovaAccount: Codable, Identifiable, Equatable {
 
     /// Apple may withhold the email address; show how the account signs in instead.
     var displayEmail: String {
-        email.isEmpty ? String(localized: "Signed in with Apple") : email
+        if !email.isEmpty { return email }
+        return appleUserID != nil ? String(localized: "Signed in with Apple") : String(localized: "Signed in with phone")
     }
 
     /// One or two letters for the monogram avatar.
@@ -94,6 +95,63 @@ enum AuthIntent: Equatable {
 enum SubmitOutcome: Equatable {
     case signedIn
     case created
+    /// The account was created and a confirmation email was sent. The person
+    /// signs in after opening its link.
+    case confirmationSent
+}
+
+/// Why a one-time code was emailed. Codes are only ever held in memory while
+/// they're typed, then sent once to the server; they're never stored.
+enum EmailCodePurpose: Equatable {
+    /// Confirm a new email-and-password account.
+    case confirmSignUp
+    /// Sign in without a password.
+    case signIn
+    /// Create a passwordless account, then add a passkey to it.
+    case passkeySignUp
+    /// Prove the email, then set a new password.
+    case resetPassword
+}
+
+/// Where a one-time code goes.
+enum CodeChannel: Equatable {
+    case email
+    case phone
+}
+
+/// Sign-in options that exist in the app but are switched off until the
+/// server side is ready.
+enum AuthFeatures {
+    /// Texting codes needs an SMS provider (such as Twilio) set up in Supabase.
+    static let phoneCodes = false
+}
+
+nonisolated enum PhoneNormalizer {
+    /// "+1 (555) 010-0000" becomes "+15550100000".
+    static func normalize(_ phone: String) -> String {
+        let trimmed = phone.trimmingCharacters(in: .whitespacesAndNewlines)
+        let digits = trimmed.filter(\.isNumber)
+        return trimmed.hasPrefix("+") ? "+" + digits : digits
+    }
+
+    /// International format: a plus sign, then 8 to 15 digits.
+    static func isValid(_ normalized: String) -> Bool {
+        normalized.hasPrefix("+") && (8...15).contains(normalized.count - 1)
+    }
+}
+
+enum CodeOutcome: Equatable {
+    case signedIn
+    case passkeyAdded
+    /// Signed in, but the passkey wasn't created (cancelled or unavailable).
+    case passkeySkipped
+}
+
+enum EmailChangeOutcome: Equatable {
+    /// The email was changed immediately (accounts kept on this device only).
+    case applied
+    /// A confirmation was sent to the new address; it changes once confirmed.
+    case confirmationSent
 }
 
 nonisolated enum PasswordIssue: Equatable {
@@ -103,9 +161,9 @@ nonisolated enum PasswordIssue: Equatable {
 
     var message: String {
         switch self {
-        case .tooShort: String(localized: "Use at least \(PasswordPolicy.minimumLength) characters.")
-        case .tooLong: String(localized: "Use no more than \(PasswordPolicy.maximumLength) characters.")
-        case .sameAsEmail: String(localized: "Your password can't be the same as your email.")
+        case .tooShort: String(localized: "Use \(PasswordPolicy.minimumLength)+ characters.")
+        case .tooLong: String(localized: "Use \(PasswordPolicy.maximumLength) characters max.")
+        case .sameAsEmail: String(localized: "Password can't match email.")
         }
     }
 }
@@ -134,8 +192,12 @@ enum EmailNormalizer {
 
 enum AuthError: LocalizedError, Equatable {
     case invalidEmail
+    case invalidPhone
     case weakPassword(PasswordIssue)
+    /// The account has a password and this wasn't it.
     case wrongPassword
+    /// Couldn't tell which part was wrong.
+    case wrongCredentials
     case tooManyAttempts(until: Date)
     case emailInUse
     case accountUnavailable
@@ -145,33 +207,48 @@ enum AuthError: LocalizedError, Equatable {
     case passkeyUnavailable
     case noAccountForPasskey
     case signInFailed
+    /// The account exists but its email hasn't been confirmed yet.
+    case emailNotConfirmed
+    /// Duova's servers couldn't be reached.
+    case network
+    case rateLimited
+    /// The server turned this sign-in method off.
+    case methodNotEnabled
+    /// The server refused with a short message that's safe to show.
+    case serverRejected(String)
+    /// No account uses this email.
+    case noAccount
+    case codeInvalid
+    case passkeyNotRecognized
+    case passkeyExists
 
+    // Messages stay at five words or fewer, and say what to do when possible.
     var errorDescription: String? {
         switch self {
-        case .invalidEmail:
-            String(localized: "Enter a valid email address.")
-        case .weakPassword(let issue):
-            issue.message
-        case .wrongPassword:
-            String(localized: "Wrong email or password.")
+        case .invalidEmail: String(localized: "Enter a valid email.")
+        case .invalidPhone: String(localized: "Use format +1 555 010 0000.")
+        case .weakPassword(let issue): issue.message
+        case .wrongPassword: String(localized: "Wrong password. Try again.")
+        case .wrongCredentials: String(localized: "Wrong email or password.")
         case .tooManyAttempts(let until):
-            String(localized: "Too many attempts. Try again in \(max(1, Int(until.timeIntervalSinceNow.rounded(.up)))) seconds.")
-        case .emailInUse:
-            String(localized: "That email already has an account. Sign in instead.")
-        case .accountUnavailable:
-            String(localized: "This account couldn't be opened. Please sign in again.")
-        case .storageFailure:
-            String(localized: "Duova couldn't save your account securely. Make sure your device is unlocked and try again.")
-        case .busy:
-            String(localized: "Still working on your last request.")
-        case .termsNotAccepted:
-            String(localized: "Accept the Terms of Use to create your account.")
-        case .passkeyUnavailable:
-            String(localized: "Passkeys aren't available for Duova on this device yet.")
-        case .noAccountForPasskey:
-            String(localized: "No Duova account on this device uses that passkey.")
-        case .signInFailed:
-            String(localized: "Sign-in didn't complete. Try again.")
+            String(localized: "Too many tries. Wait \(max(1, Int(until.timeIntervalSinceNow.rounded(.up))))s.")
+        case .emailInUse: String(localized: "Email registered. Sign in instead.")
+        case .accountUnavailable: String(localized: "Account unavailable. Sign in again.")
+        case .storageFailure: String(localized: "Couldn't save. Unlock device.")
+        case .busy: String(localized: "Still working on it.")
+        case .termsNotAccepted: String(localized: "Accept the Terms first.")
+        case .passkeyUnavailable: String(localized: "Passkeys unavailable here.")
+        case .noAccountForPasskey: String(localized: "No account for that passkey.")
+        case .signInFailed: String(localized: "Sign-in didn't finish. Retry.")
+        case .emailNotConfirmed: String(localized: "Confirm your email first.")
+        case .network: String(localized: "No connection. Try again.")
+        case .rateLimited: String(localized: "Too many requests. Wait.")
+        case .methodNotEnabled: String(localized: "This method isn't enabled.")
+        case .serverRejected(let message): message
+        case .noAccount: String(localized: "No account uses this email.")
+        case .codeInvalid: String(localized: "Code wrong or expired.")
+        case .passkeyNotRecognized: String(localized: "Passkey not recognized.")
+        case .passkeyExists: String(localized: "Passkey already added.")
         }
     }
 }

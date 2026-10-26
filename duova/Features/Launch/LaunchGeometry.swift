@@ -44,9 +44,9 @@ struct LaunchGeometry {
         let tile = Motion.clamp(min(safeW, safeH) * 0.16, 40, 92)
         tileSize = tile
 
-        let textBlock = Self.baseTextBlock * s
+        // The logo sits at the exact center of the screen; the wordmark hangs below it.
         let gap = Self.baseGap * s
-        heroCenter = CGPoint(x: mid.x, y: mid.y - (gap + textBlock) / 2)
+        heroCenter = CGPoint(x: size.width / 2, y: size.height / 2)
         textTop = heroCenter.y + hero / 2 + gap
 
         let margin = 10 * s

@@ -13,6 +13,13 @@ struct RootView: View {
     @State private var servicePreferences: ServicePreferences
     @State private var display = DisplayPreferences()
     @State private var isLaunching = true
+    @State private var preferenceSync = PreferenceSync()
+    @State private var keyring = DeviceKeyring()
+    @State private var appSignIn = AppSignInCenter()
+    @State private var showDeviceLink = false
+    @State private var approvingDevice: LinkedDevice?
+    /// Requests already shown this launch ("Later" isn't asked again).
+    @State private var shownRequests: Set<UUID> = []
 
     @Environment(\.scenePhase) private var scenePhase
     @Environment(\.accessibilityReduceMotion) private var systemReduceMotion
@@ -40,10 +47,14 @@ struct RootView: View {
         }
         // Under everything, so no edge of the window can ever show as a black bar.
         .background { DuovaBackdrop() }
+        .pageSheetHost()
+        .scrollIndicators(.hidden, axes: [.vertical, .horizontal])
         .environment(auth)
         .environment(session)
         .environment(servicePreferences)
         .environment(display)
+        .environment(keyring)
+        .environment(appSignIn)
         .duovaTheme(style: display.colorStyle)
         .bookPostureAware()
         .preferredColorScheme(display.appearance.colorScheme)
@@ -52,15 +63,62 @@ struct RootView: View {
             session.activate(accountID: id)
             servicePreferences.activate(accountID: id)
         }
-        .task { await auth.verifyAppleCredential() }
+        .task(id: auth.account?.id) {
+            await auth.verifyAppleCredential()
+            await auth.verifyCloudSession()
+            await keyring.prepare(accountID: auth.account?.id)
+        }
+        // Encrypted sync starts only once this device has the account's keys.
+        .task(id: keyring.readyAccountID) {
+            guard let accountID = keyring.readyAccountID else {
+                preferenceSync.stop()
+                appSignIn.stop()
+                return
+            }
+            await auth.syncPrivateName()
+            await preferenceSync.start(accountID: accountID, current: preferenceSnapshot, apply: apply)
+            appSignIn.start(accountID: accountID)
+            await watchForNewDevices()
+        }
+        .task(id: keyring.state) {
+            guard case .waitingForApproval = keyring.state else { return }
+            showDeviceLink = true
+            await keyring.waitForApproval()
+        }
+        .onChange(of: preferenceSnapshot) { _, snapshot in preferenceSync.changed(snapshot) }
         .onChange(of: scenePhase) { _, newPhase in
             switch newPhase {
-            case .active: auth.sceneDidBecomeActive()
+            case .active:
+                auth.sceneDidBecomeActive()
+                if keyring.state == .offline {
+                    Task { await keyring.prepare(accountID: auth.account?.id) }
+                }
             case .background: auth.sceneDidEnterBackground()
             default: break
             }
             if newPhase != .active { session.recordInactive() }
         }
+    }
+
+    /// Everything that syncs with the account (App Lock settings stay on the device).
+    private var preferenceSnapshot: PreferenceSnapshot {
+        PreferenceSnapshot(
+            appearance: display.appearance, colorStyle: display.colorStyle, motion: display.motion,
+            defaults: servicePreferences.defaults,
+            overrides: Dictionary(uniqueKeysWithValues: servicePreferences.overrides.map { ($0.key.rawValue, $0.value) }),
+            favorites: session.favorites.map(\.rawValue))
+    }
+
+    private func apply(_ snapshot: PreferenceSnapshot) {
+        display.appearance = snapshot.appearance
+        display.colorStyle = snapshot.colorStyle
+        display.motion = snapshot.motion
+        servicePreferences.replaceAll(
+            defaults: snapshot.defaults,
+            overrides: Dictionary(uniqueKeysWithValues: snapshot.overrides.compactMap { key, value in
+                ServiceID(rawValue: key).map { ($0, value) }
+            }))
+        session.replaceFavorites(snapshot.favorites.compactMap(ServiceID.init(rawValue:)))
     }
 
     @ViewBuilder
@@ -71,7 +129,25 @@ struct RootView: View {
         case .locked:
             LockView().transition(.opacity)
         case .active:
-            MainShell().transition(.opacity)
+            MainShell()
+                .transition(.opacity)
+                .pageSheet(isPresented: $showDeviceLink) { DeviceLinkView() }
+                .pageSheet(item: $approvingDevice) { DeviceApprovalView(device: $0) }
+        }
+    }
+
+    /// On a device with the keys, offers each new device's request once.
+    private func watchForNewDevices() async {
+        while !Task.isCancelled {
+            if scenePhase == .active {
+                await keyring.refreshDevices()
+                if approvingDevice == nil, auth.phase == .active,
+                   let request = keyring.pendingDevices.first(where: { !shownRequests.contains($0.id) }) {
+                    shownRequests.insert(request.id)
+                    approvingDevice = request
+                }
+            }
+            try? await Task.sleep(for: .seconds(15))
         }
     }
 

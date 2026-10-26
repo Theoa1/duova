@@ -54,6 +54,13 @@ final class AppSession {
         try? store.save(favorites.map(\.rawValue), name: Self.favoritesName(accountID))
     }
 
+    /// Replaces the favorites (used when the account's synced copy arrives).
+    func replaceFavorites(_ ids: [ServiceID]) {
+        favorites = ids
+        guard let accountID else { return }
+        try? store.save(favorites.map(\.rawValue), name: Self.favoritesName(accountID))
+    }
+
     /// Call whenever the scene stops being active so the next launch can choose
     /// the resume variant.
     func recordInactive(now: Date = .now) {

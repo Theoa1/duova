@@ -48,7 +48,6 @@ struct AppPreferencesPage: View {
                     }
                 }
             }
-            .frame(maxWidth: 640)
             .padding(.horizontal, DuovaMetrics.screenMargin)
             .padding(.vertical, 12)
             .frame(maxWidth: .infinity)
@@ -94,7 +93,6 @@ struct AppPreferencesPage: View {
             if let current {
                 ScrollView {
                     ServicePreferencesContent(service: current)
-                        .frame(maxWidth: 560)
                         .padding(DuovaMetrics.screenMargin)
                         .frame(maxWidth: .infinity)
                 }
@@ -170,6 +168,7 @@ struct ServicePreferencesContent: View {
 
     let service: Service
     @State private var confirmReset = false
+    @State private var showLogin = false
 
     private func binding<Value>(_ keyPath: WritableKeyPath<ServiceOverrides, Value?>) -> Binding<Value?> {
         Binding(
@@ -193,6 +192,14 @@ struct ServicePreferencesContent: View {
                 Spacer(minLength: 0)
             }
             .accessibilityElement(children: .combine)
+
+            SettingsGroup(
+                title: "Sign-in",
+                footer: "Encrypted twice. Codes are never saved."
+            ) {
+                SettingsButtonRow(symbol: "key.fill", title: "Saved Login") { showLogin = true }
+                    .morphSource("profile-login.\(service.id.rawValue)")
+            }
 
             SettingsGroup(title: "Look & feel") {
                 OverrideRow(title: "Appearance", global: display.appearance, override: binding(\.appearance))
@@ -218,6 +225,9 @@ struct ServicePreferencesContent: View {
                 }
                 .disabled(prefs.overrideCount(for: service.id) == 0)
             }
+        }
+        .morphCard(isPresented: $showLogin, from: "profile-login.\(service.id.rawValue)") {
+            SavedLoginView(service: service)
         }
         .confirmationDialog("Reset \(service.name)?", isPresented: $confirmReset, titleVisibility: .visible) {
             Button("Reset to Duova Defaults", role: .destructive) { prefs.reset(service.id) }

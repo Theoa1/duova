@@ -21,6 +21,7 @@ struct LockView: View {
     @State private var isPrompting = false
     @State private var hasAutoPrompted = false
     @State private var confirmSignOut = false
+    @State private var confirmReset = false
     @State private var windowSize: CGSize = .zero
     @FocusState private var passwordFocused: Bool
 
@@ -59,6 +60,11 @@ struct LockView: View {
             Button("Sign Out", role: .destructive) { auth.signOut() }
         } message: {
             Text("You'll need your email and password to sign in again. Your settings and favorites stay saved, encrypted, on this device.")
+        }
+        .confirmationDialog("Reset your password?", isPresented: $confirmReset, titleVisibility: .visible) {
+            Button("Sign Out & Reset") { auth.signOutToResetPassword() }
+        } message: {
+            Text("You'll be signed out, then we'll email a code to \(auth.account?.email ?? "").")
         }
     }
 
@@ -159,7 +165,7 @@ struct LockView: View {
             .disabled(isPrompting)
         } else {
             FormMessage(
-                text: String(localized: "No device passcode is set. Set one in Settings to unlock Duova."),
+                text: String(localized: "Set a device passcode first."),
                 kind: .error
             )
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -222,6 +228,16 @@ struct LockView: View {
             .foregroundStyle(theme.onAccent)
             .disabled(password.isEmpty || auth.isWorking)
 
+            if auth.usesCloud, auth.account?.email.isEmpty == false {
+                Button("Forgot password?") {
+                    passwordFocused = false
+                    confirmReset = true
+                }
+                .font(.subheadline.weight(.semibold))
+                .foregroundStyle(theme.accent)
+                .frame(minHeight: 44)
+            }
+
             if kind.isAvailable {
                 Button(kind.isBiometric ? "Use \(kind.title)" : "Use device passcode") {
                     usePassword = false
@@ -248,8 +264,8 @@ struct LockView: View {
         case .unavailable:
             if auth.accountHasPassword { usePassword = true }
             message = auth.accountHasPassword
-                ? String(localized: "\(kind.title) isn't available right now. Use your account password.")
-                : String(localized: "\(kind.title) isn't available right now. Set up a device passcode in Settings.")
+                ? String(localized: "\(kind.title) unavailable. Use password.")
+                : String(localized: "\(kind.title) unavailable. Set passcode.")
         case .failed(let reason):
             // An automatic prompt that was interrupted stays quiet; the buttons are right there.
             message = automatic ? nil : reason

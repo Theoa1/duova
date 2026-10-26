@@ -80,9 +80,9 @@ enum BiometricAuthenticator {
             case .systemCancel, .appCancel:
                 // The system interrupted the prompt (for example the app wasn't
                 // in front yet). Not the user's choice, so say so.
-                return .failed(String(localized: "The prompt was interrupted. Try again."))
+                return .failed(String(localized: "Prompt interrupted. Try again."))
             case .biometryLockout:
-                return .failed(String(localized: "Too many attempts. Use your device passcode."))
+                return .failed(String(localized: "Too many tries. Use passcode."))
             case .biometryNotAvailable, .passcodeNotSet, .biometryNotEnrolled:
                 return .unavailable
             default:

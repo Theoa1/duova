@@ -46,12 +46,31 @@ extension View {
 /// runs the full width of its space with a small margin, and splits into two
 /// columns when there is room for them.
 struct SettingsPage<Content: View>: View {
+    @Environment(\.duovaTheme) private var theme
     let title: LocalizedStringKey
+    /// Cards have no navigation bar, so they show the title at the top of the page.
+    var showsTitle = false
     @ViewBuilder var content: Content
     @State private var width: CGFloat = 0
 
+    init(title: LocalizedStringKey, showsTitle: Bool = false, @ViewBuilder content: () -> Content) {
+        self.title = title
+        self.showsTitle = showsTitle
+        self.content = content()
+    }
+
     var body: some View {
         ScrollView {
+            if showsTitle {
+                Text(title)
+                    .font(.title2.bold())
+                    .foregroundStyle(theme.textPrimary)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.horizontal, DuovaMetrics.screenMargin)
+                    .padding(.top, 20)
+                    .padding(.trailing, 44)
+                    .accessibilityAddTraits(.isHeader)
+            }
             Group(subviews: content) { subviews in
                 if width >= 700 {
                     HStack(alignment: .top, spacing: 20) {
@@ -114,6 +133,7 @@ struct SettingsGroup<Content: View>: View {
                     }
                 }
             }
+            .frame(maxWidth: .infinity, alignment: .leading)
             .duovaGlassCard()
 
             if let footer {
@@ -124,6 +144,7 @@ struct SettingsGroup<Content: View>: View {
                     .fixedSize(horizontal: false, vertical: true)
             }
         }
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 }
 

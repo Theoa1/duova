@@ -1,0 +1,5 @@
+// Copy this file to DuovaDev.xcconfig and fill in your own values.
+// DuovaDev.xcconfig is not committed.
+// Enter the host WITHOUT "https://": "//" starts a comment in an .xcconfig file.
+DUOVA_SUPABASE_HOST = YOUR_PROJECT_REF.supabase.co
+DUOVA_SUPABASE_PUBLISHABLE_KEY = sb_publishable_YOUR_KEY_HERE

@@ -16,6 +16,7 @@ struct EditProfileView: View {
     @State private var pendingPreview: UIImage?
     @State private var removePhoto = false
     @State private var message: String?
+    @State private var notice: String?
     @State private var isSaving = false
     @State private var didLoad = false
 
@@ -40,65 +41,62 @@ struct EditProfileView: View {
     }
 
     var body: some View {
-        NavigationStack {
-            SettingsPage(title: "Edit Profile") {
-                photoSection
+        SettingsPage(title: "Edit Profile", showsTitle: true) {
+            photoSection
 
-                SettingsGroup(title: "Name") {
-                    FormFieldRow(symbol: "person.fill") {
-                        TextField("Full name", text: $name)
-                            .textContentType(.name)
-                            .textInputAutocapitalization(.words)
-                            .submitLabel(.next)
-                    }
-                }
-
-                if auth.accountHasPassword {
-                    SettingsGroup(
-                        title: "Email",
-                        footer: emailChanged
-                            ? "Enter your current password to confirm the new email. You'll use the new email to sign in."
-                            : "This is the email you sign in with."
-                    ) {
-                        FormFieldRow(symbol: "envelope.fill") {
-                            TextField("Email", text: $email)
-                                .keyboardType(.emailAddress)
-                                .textContentType(.emailAddress)
-                                .textInputAutocapitalization(.never)
-                                .autocorrectionDisabled()
-                        }
-                        if emailChanged {
-                            FormFieldRow(symbol: "lock.fill") {
-                                SecureField("Current password", text: $password)
-                                    .textContentType(.password)
-                            }
-                        }
-                    }
-                } else if let account {
-                    SettingsGroup(
-                        title: "Email",
-                        footer: "This account signs in without a password, so its email can't be changed here."
-                    ) {
-                        SettingsValueRow(title: "Email", value: account.displayEmail)
-                    }
-                }
-
-                if let message {
-                    FormMessage(text: message, kind: .error)
+            SettingsGroup(title: "Name") {
+                FormFieldRow(symbol: "person.fill") {
+                    TextField("Full name", text: $name)
+                        .textContentType(.name)
+                        .textInputAutocapitalization(.words)
+                        .submitLabel(.next)
                 }
             }
-            .toolbar {
-                ToolbarItem(placement: .cancellationAction) {
-                    Button("Cancel") { closeSheet() }
-                        .disabled(isSaving)
+
+            if auth.accountHasPassword {
+                SettingsGroup(
+                    title: "Email",
+                    footer: emailChanged
+                        ? (auth.usesCloud
+                           ? "Enter your current password. We'll email the new address, and it becomes your sign-in email once you confirm it."
+                           : "Enter your current password to confirm the new email. You'll use the new email to sign in.")
+                        : "This is the email you sign in with."
+                ) {
+                    FormFieldRow(symbol: "envelope.fill") {
+                        TextField("Email", text: $email)
+                            .keyboardType(.emailAddress)
+                            .textContentType(.emailAddress)
+                            .textInputAutocapitalization(.never)
+                            .autocorrectionDisabled()
+                    }
+                    if emailChanged {
+                        FormFieldRow(symbol: "lock.fill") {
+                            SecureField("Current password", text: $password)
+                                .textContentType(.password)
+                        }
+                    }
                 }
-                ToolbarItem(placement: .confirmationAction) {
-                    Button("Save", action: save)
-                        .disabled(!canSave)
+            } else if let account {
+                SettingsGroup(
+                    title: "Email",
+                    footer: "This account signs in without a password, so its email can't be changed here."
+                ) {
+                    SettingsValueRow(title: "Email", value: account.displayEmail)
                 }
             }
-            .interactiveDismissDisabled(isSaving)
+
+            if let notice {
+                FormMessage(text: notice, kind: .success)
+            }
+            if let message {
+                FormMessage(text: message, kind: .error)
+            }
+
+            ProminentActionButton(title: "Save", isWorking: isSaving, action: save)
+                .disabled(!canSave)
         }
+        .pageSheetCloseDisabled(isSaving)
+        .cardDiscardGuard(hasChanges)
         .onAppear {
             guard !didLoad, let account else { return }
             didLoad = true
@@ -164,7 +162,7 @@ struct EditProfileView: View {
               let prepared = AvatarProcessor.prepare(data),
               let image = UIImage(data: prepared)
         else {
-            message = String(localized: "That photo couldn't be loaded. Choose a different one.")
+            message = String(localized: "Photo didn't load. Pick another.")
             pickerItem = nil
             return
         }
@@ -179,17 +177,30 @@ struct EditProfileView: View {
         guard canSave else { return }
         isSaving = true
         message = nil
+        notice = nil
         Task {
             defer { isSaving = false }
             do {
                 if nameChanged { try auth.updateName(name) }
-                if emailChanged { try await auth.changeEmail(to: email, password: password) }
+                var outcome = EmailChangeOutcome.applied
+                let requestedEmail = EmailNormalizer.normalize(email)
+                if emailChanged { outcome = try await auth.changeEmail(to: email, password: password) }
                 if let pendingPhoto {
                     try auth.setAvatar(pendingPhoto)
                 } else if removePhoto {
                     try auth.setAvatar(nil)
                 }
-                closeSheet()
+                if outcome == .confirmationSent {
+                    // The email only changes after the new inbox confirms it, so stay
+                    // open and say so instead of pretending it already changed.
+                    notice = String(localized: "Confirm via link sent to \(requestedEmail).")
+                    email = auth.account?.email ?? email
+                    password = ""
+                    pendingPhoto = nil
+                    removePhoto = false
+                } else {
+                    closeSheet()
+                }
             } catch let error as AuthError {
                 message = error.errorDescription
             } catch {
@@ -210,49 +221,36 @@ struct ChangePasswordView: View {
     @State private var message: String?
     @State private var isSaving = false
 
-    private var mismatch: Bool { !confirm.isEmpty && confirm != new }
     private var canSave: Bool {
-        !current.isEmpty && new.count >= PasswordPolicy.minimumLength && confirm == new && !isSaving
+        !current.isEmpty && PasswordRules.isSatisfied(new, confirmation: confirm) && !isSaving
     }
 
     var body: some View {
-        NavigationStack {
-            SettingsPage(title: "Change Password") {
-                SettingsGroup(title: "Current password") {
-                    FormFieldRow(symbol: "lock.fill") {
-                        SecureField("Current password", text: $current)
-                            .textContentType(.password)
-                    }
-                }
-                SettingsGroup(
-                    title: "New password",
-                    footer: "Use at least \(PasswordPolicy.minimumLength) characters. Your password is never stored, only a salted one-way hash."
-                ) {
-                    FormFieldRow(symbol: "lock.rotation") {
-                        SecureField("New password", text: $new)
-                            .textContentType(.newPassword)
-                    }
-                    FormFieldRow(symbol: "checkmark.shield.fill") {
-                        SecureField("Confirm new password", text: $confirm)
-                            .textContentType(.newPassword)
-                    }
-                }
-                if mismatch {
-                    FormMessage(text: String(localized: "The new passwords don't match."), kind: .error)
-                }
-                if let message {
-                    FormMessage(text: message, kind: .error)
-                }
-                ProminentActionButton(title: "Update Password", isWorking: isSaving, action: save)
-                    .disabled(!canSave)
-            }
-            .toolbar {
-                ToolbarItem(placement: .cancellationAction) {
-                    Button("Cancel") { closeSheet() }.disabled(isSaving)
+        SettingsPage(title: "Change Password", showsTitle: true) {
+            SettingsGroup(title: "Current password") {
+                FormFieldRow(symbol: "lock.fill") {
+                    SecureField("Current password", text: $current)
+                        .textContentType(.password)
                 }
             }
-            .interactiveDismissDisabled(isSaving)
+            SettingsGroup(title: "New password") {
+                FormFieldRow(symbol: "lock.rotation") {
+                    SecureField("New password", text: $new)
+                        .textContentType(.newPassword)
+                }
+                FormFieldRow(symbol: "checkmark.shield.fill") {
+                    SecureField("Confirm new password", text: $confirm)
+                        .textContentType(.newPassword)
+                }
+            }
+            PasswordRules(password: new, confirmation: confirm)
+            if let message {
+                FormMessage(text: message, kind: .error)
+            }
+            ProminentActionButton(title: "Update Password", isWorking: isSaving, action: save)
+                .disabled(!canSave)
         }
+        .pageSheetCloseDisabled(isSaving)
     }
 
     private func save() {
@@ -263,6 +261,62 @@ struct ChangePasswordView: View {
             defer { isSaving = false }
             do {
                 try await auth.changePassword(current: current, new: new)
+                closeSheet()
+            } catch let error as AuthError {
+                message = error.errorDescription
+            } catch {
+                message = String(localized: "Something went wrong. Try again.")
+            }
+        }
+    }
+}
+
+/// Adds a password to an account that signs in with Apple, a passkey or email
+/// codes, so it can also sign in with email and password.
+struct CreatePasswordView: View {
+    @Environment(\.closeSheet) private var closeSheet
+    @Environment(AuthController.self) private var auth
+
+    @State private var new = ""
+    @State private var confirm = ""
+    @State private var message: String?
+    @State private var isSaving = false
+
+    private var canSave: Bool { PasswordRules.isSatisfied(new, confirmation: confirm) && !isSaving }
+
+    var body: some View {
+        SettingsPage(title: "Create Password", showsTitle: true) {
+            SettingsGroup(
+                title: "Password",
+                footer: "Sign in with \(auth.account?.email ?? "") and this password. Other methods keep working."
+            ) {
+                FormFieldRow(symbol: "lock.fill") {
+                    SecureField("New password", text: $new)
+                        .textContentType(.newPassword)
+                }
+                FormFieldRow(symbol: "checkmark.shield.fill") {
+                    SecureField("Confirm password", text: $confirm)
+                        .textContentType(.newPassword)
+                }
+            }
+            PasswordRules(password: new, confirmation: confirm)
+            if let message {
+                FormMessage(text: message, kind: .error)
+            }
+            ProminentActionButton(title: "Create Password", isWorking: isSaving, action: save)
+                .disabled(!canSave)
+        }
+        .pageSheetCloseDisabled(isSaving)
+    }
+
+    private func save() {
+        guard canSave else { return }
+        isSaving = true
+        message = nil
+        Task {
+            defer { isSaving = false }
+            do {
+                try await auth.setPassword(new)
                 closeSheet()
             } catch let error as AuthError {
                 message = error.errorDescription
@@ -284,44 +338,37 @@ struct DeleteAccountView: View {
     @State private var isDeleting = false
 
     var body: some View {
-        NavigationStack {
-            SettingsPage(title: "Delete Account") {
-                VStack(alignment: .leading, spacing: 10) {
-                    Label("This can't be undone", systemImage: "exclamationmark.triangle.fill")
-                        .font(.headline)
-                        .foregroundStyle(theme.danger)
-                    Text("Deleting your Duova account permanently erases your profile, photo, favorites, preferences and sign-in details from this device. It doesn't delete your accounts on other services.")
-                        .font(.subheadline)
-                        .foregroundStyle(theme.textPrimary)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-                .padding(16)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .duovaGlassCard()
+        SettingsPage(title: "Delete Account", showsTitle: true) {
+            VStack(alignment: .leading, spacing: 10) {
+                Label("This can't be undone", systemImage: "exclamationmark.triangle.fill")
+                    .font(.headline)
+                    .foregroundStyle(theme.danger)
+                Text("Deleting your Duova account permanently erases your profile, photo, favorites, preferences and sign-in details from this device, and clears your private data stored with Duova. It doesn't delete your accounts on other services.")
+                    .font(.subheadline)
+                    .foregroundStyle(theme.textPrimary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            .padding(16)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .duovaGlassCard()
 
-                if auth.accountHasPassword {
-                    SettingsGroup(title: "Confirm with your password") {
-                        FormFieldRow(symbol: "lock.fill") {
-                            SecureField("Account password", text: $password)
-                                .textContentType(.password)
-                        }
+            if auth.accountHasPassword {
+                SettingsGroup(title: "Confirm with your password") {
+                    FormFieldRow(symbol: "lock.fill") {
+                        SecureField("Account password", text: $password)
+                            .textContentType(.password)
                     }
                 }
-
-                if let message {
-                    FormMessage(text: message, kind: .error)
-                }
-
-                ProminentActionButton(title: "Delete My Account", isWorking: isDeleting, isDestructive: true, action: delete)
-                    .disabled((auth.accountHasPassword && password.isEmpty) || isDeleting)
             }
-            .toolbar {
-                ToolbarItem(placement: .cancellationAction) {
-                    Button("Cancel") { closeSheet() }.disabled(isDeleting)
-                }
+
+            if let message {
+                FormMessage(text: message, kind: .error)
             }
-            .interactiveDismissDisabled(isDeleting)
+
+            ProminentActionButton(title: "Delete My Account", isWorking: isDeleting, isDestructive: true, action: delete)
+                .disabled((auth.accountHasPassword && password.isEmpty) || isDeleting)
         }
+        .pageSheetCloseDisabled(isDeleting)
     }
 
     private func delete() {
@@ -333,7 +380,7 @@ struct DeleteAccountView: View {
                 switch await auth.deletePasswordlessAccount() {
                 case .success, .cancelled: break
                 case .unavailable:
-                    message = String(localized: "Set a device passcode to confirm deleting this account.")
+                    message = String(localized: "Set a device passcode first.")
                 case .failed(let reason):
                     message = reason
                 }
