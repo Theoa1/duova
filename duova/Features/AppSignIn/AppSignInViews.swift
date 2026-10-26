@@ -151,7 +151,7 @@ struct AppSignInSheet: View {
 }
 
 /// Shows an existing web view (which may have been loading off screen).
-private struct WebViewHost: UIViewRepresentable {
+struct WebViewHost: UIViewRepresentable {
     let webView: WKWebView
 
     func makeUIView(context: Context) -> UIView {

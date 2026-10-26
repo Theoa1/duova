@@ -1,8 +1,8 @@
 import SwiftUI
 
 /// Detail card for a catalog service. Describes the true status of the
-/// service and offers only actions that work today: favoriting, and signing
-/// in so the app's session is ready. The full saved-login page morphs out of
+/// service and offers only actions that work today: opening it when it can be,
+/// favoriting, and signing in so the app's session is ready. The full saved-login page morphs out of
 /// the sign-in section and lands over this card. There's no title bar: the name
 /// is in the card itself, and tapping outside (or the X on a closed phone) closes it.
 struct ServiceDetailView: View {
@@ -10,6 +10,7 @@ struct ServiceDetailView: View {
     @Environment(AppSession.self) private var session
 
     let service: Service
+    let launch: () -> Void
 
     @State private var showsSavedLogin = false
 
@@ -31,11 +32,20 @@ struct ServiceDetailView: View {
                 .multilineTextAlignment(.center)
                 .accessibilityElement(children: .combine)
 
+                if service.canLaunch {
+                    ProminentActionButton(title: "Open \(service.name)", action: launch)
+                }
+
                 VStack(alignment: .leading, spacing: 10) {
                     StatusBadge(status: service.status)
                     Text(service.status.explanation)
                         .font(.body)
                         .foregroundStyle(theme.textPrimary)
+                    if let limitations = service.limitations {
+                        Text(limitations)
+                            .font(.subheadline)
+                            .foregroundStyle(theme.textSecondary)
+                    }
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .padding(16)
@@ -52,11 +62,9 @@ struct ServiceDetailView: View {
                     )
                     .frame(maxWidth: .infinity)
                 }
-                .buttonStyle(.glassProminent)
+                .buttonStyle(.glass)
                 .buttonBorderShape(.roundedRectangle(radius: DuovaMetrics.cornerRadius))
                 .controlSize(.large)
-                .tint(theme.accent)
-                .foregroundStyle(theme.onAccent)
 
                 Text("\(service.name) is an independent product. Duova is not affiliated with, sponsored by, or endorsed by its owner.")
                     .font(.footnote)

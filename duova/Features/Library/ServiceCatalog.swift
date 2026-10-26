@@ -86,7 +86,7 @@ enum CompatibilityStatus: String, CaseIterable {
         case .enhancedWeb:
             String(localized: "A usable website with tested improvements.")
         case .limitedWeb:
-            String(localized: "The website has known significant limitations. Details are shown before opening.")
+            String(localized: "Opens the service's website inside Duova. It has known limitations, listed here.")
         case .nativeHandoff:
             String(localized: "An embedded experience is not suitable. Duova hands off to the official app or browser.")
         case .unsupported:
@@ -143,6 +143,12 @@ struct Service: Identifiable, Hashable {
     /// Muted accent used for light trails in the launch animation.
     let accent: Color
     let status: CompatibilityStatus
+    /// Where the service opens inside Duova; nil while it can't be opened.
+    var launchURL: URL? = nil
+    /// What doesn't work when it's opened here.
+    var limitations: String? = nil
+
+    var canLaunch: Bool { launchURL != nil }
 
     func matches(_ query: String) -> Bool {
         let q = query.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -154,13 +160,15 @@ struct Service: Identifiable, Hashable {
 }
 
 /// Bundled catalog. Entries are research candidates drawn from the blueprint's
-/// candidate list; none has passed compatibility review.
+/// candidate list; only Instagram opens so far, as its website.
 enum ServiceCatalog {
     /// Ordered so categories alternate. The launch animation uses a prefix of
     /// this list, so the first icons shown are always visually varied.
     static let all: [Service] = [
         Service(id: .instagram, name: "Instagram", category: .social,
-                aliases: ["IG", "Insta"], accent: Color(hex: 0xC7678E), status: .underReview),
+                aliases: ["IG", "Insta"], accent: Color(hex: 0xC7678E), status: .limitedWeb,
+                launchURL: URL(string: "https://www.instagram.com/"),
+                limitations: String(localized: "This is Instagram's website, so app-only features like going live and notifications aren't available.")),
         Service(id: .youtube, name: "YouTube", category: .streaming,
                 aliases: ["YT", "Video"], accent: Color(hex: 0xC96A6A), status: .underReview),
         Service(id: .excel, name: "Excel", category: .productivity,

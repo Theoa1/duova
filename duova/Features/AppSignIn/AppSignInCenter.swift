@@ -291,6 +291,34 @@ final class AppSignInCenter {
         try? store.saveSessionCache(data, for: slug)
     }
 
+    // MARK: Opening an app
+
+    /// The app's own cookie jar for opening it inside Duova, holding its saved
+    /// session when there is one.
+    func prepareLaunch(_ id: ServiceID) async -> WKWebsiteDataStore {
+        let dataStore = dataStore(for: id)
+        if let store = loginStore, let recipe = recipes[id.rawValue] {
+            let live = await dataStore.httpCookieStore.allCookies()
+            let hasSession = live.contains { recipe.ownsCookie(domain: $0.domain) && recipe.sessionCookies.contains($0.name) }
+            if !hasSession {
+                _ = await restoreCookies(from: store, slug: id.rawValue, recipe: recipe, into: dataStore)
+            }
+        }
+        return dataStore
+    }
+
+    /// Keeps the session from the opened app, so it's there next time.
+    func endLaunch(_ id: ServiceID) async {
+        guard let store = loginStore, let recipe = recipes[id.rawValue], let dataStore = dataStores[id] else { return }
+        let cookies = await dataStore.httpCookieStore.allCookies().filter { recipe.ownsCookie(domain: $0.domain) }
+        guard cookies.contains(where: { recipe.sessionCookies.contains($0.name) && !$0.value.isEmpty }),
+              let data = try? JSONEncoder().encode(cookies.map(StoredCookie.init))
+        else { return }
+        try? store.saveSessionCache(data, for: id.rawValue)
+        resetTries(store.reference(id.rawValue))
+        statuses[id] = .signedIn
+    }
+
     // MARK: Signing in by hand
 
     /// The page for the sign-in sheet: the one paused at a code step, or a

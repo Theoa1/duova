@@ -42,6 +42,7 @@ struct LibraryView<Header: View>: View {
     @ViewBuilder var header: Header
     @State private var filter: LibraryFilter = .all
     @State private var selected: Service?
+    @State private var launched: Service?
 
     private var results: [Service] {
         ServiceCatalog.all.filter { service in
@@ -96,8 +97,31 @@ struct LibraryView<Header: View>: View {
             .toolbar(.hidden, for: .navigationBar)
         }
         .morphCard(item: $selected, from: { "service.\($0.id.rawValue)" }) { service in
-            ServiceDetailView(service: service)
+            ServiceDetailView(service: service) {
+                selected = nil
+                launch(service)
+            }
         }
+        .overlay {
+            if let launched, let url = launched.launchURL {
+                AppWorkspaceView(service: launched, url: url) { setLaunched(nil) }
+                    .transition(.opacity.combined(with: .scale(scale: 0.96)))
+            }
+        }
+    }
+
+    /// Tapping an app opens it; one that can't open yet shows its card instead.
+    private func tap(_ service: Service) {
+        if service.canLaunch { launch(service) } else { selected = service }
+    }
+
+    private func launch(_ service: Service) {
+        guard service.canLaunch else { return }
+        setLaunched(service)
+    }
+
+    private func setLaunched(_ service: Service?) {
+        withAnimation(.spring(response: 0.38, dampingFraction: 0.9)) { launched = service }
     }
 
     /// The title row over the filter chips. Hiding the title slides the pair up
@@ -193,7 +217,8 @@ struct LibraryView<Header: View>: View {
                     service: service,
                     isFavorite: session.isFavorite(service.id),
                     signIn: signIn.status(for: service.id),
-                    open: { selected = service },
+                    open: { tap(service) },
+                    showDetails: { selected = service },
                     toggleFavorite: { session.toggleFavorite(service.id) }
                 )
                 .morphSource("service.\(service.id.rawValue)")
@@ -296,20 +321,33 @@ private struct ServiceRow: View {
     let isFavorite: Bool
     let signIn: AppSignInStatus
     let open: () -> Void
+    let showDetails: () -> Void
     let toggleFavorite: () -> Void
+
+    @State private var isPressed = false
+    @State private var detailsShown = 0
 
     var body: some View {
         let shape = RoundedRectangle(cornerRadius: DuovaMetrics.cornerRadius, style: .continuous)
 
         HStack(spacing: 2) {
-            Button(action: open) {
-                label
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .contentShape(shape)
-            }
-            .buttonStyle(CardPressStyle())
-            .accessibilityElement(children: .combine)
-            .accessibilityHint(Text("Shows details"))
+            // Tap opens the app; a long press shows its card.
+            label
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .contentShape(shape)
+                .opacity(isPressed ? 0.7 : 1)
+                .scaleEffect(isPressed ? 0.985 : 1)
+                .animation(.easeOut(duration: 0.12), value: isPressed)
+                .onTapGesture(perform: open)
+                .onLongPressGesture(minimumDuration: 0.35) {
+                    detailsShown += 1
+                    showDetails()
+                } onPressingChanged: { isPressed = $0 }
+                .sensoryFeedback(.impact(weight: .medium), trigger: detailsShown)
+                .accessibilityElement(children: .combine)
+                .accessibilityAddTraits(.isButton)
+                .accessibilityHint(Text(service.canLaunch ? "Opens \(service.name)" : "Shows details"))
+                .accessibilityAction(named: Text("Show details"), showDetails)
 
             Button(action: toggleFavorite) {
                 Image(systemName: isFavorite ? "star.fill" : "star")
@@ -355,16 +393,6 @@ private struct ServiceRow: View {
             AppSignInTag(status: signIn)
                 .padding(.top, 1)
         }
-    }
-}
-
-/// Gentle press feedback for glass cards.
-private struct CardPressStyle: ButtonStyle {
-    func makeBody(configuration: Configuration) -> some View {
-        configuration.label
-            .opacity(configuration.isPressed ? 0.7 : 1)
-            .scaleEffect(configuration.isPressed ? 0.985 : 1)
-            .animation(.easeOut(duration: 0.12), value: configuration.isPressed)
     }
 }
 
