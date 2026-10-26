@@ -77,7 +77,7 @@ struct RootView: View {
             }
             await auth.syncPrivateName()
             await preferenceSync.start(accountID: accountID, current: preferenceSnapshot, apply: apply)
-            appSignIn.start(accountID: accountID)
+            appSignIn.start(accountID: accountID, priority: session.favorites)
             await watchForNewDevices()
         }
         .task(id: keyring.state) {

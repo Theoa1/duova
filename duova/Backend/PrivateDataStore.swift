@@ -209,34 +209,4 @@ nonisolated struct PrivateDataStore: Sendable {
             .value
         return removed.count
     }
-
-    // MARK: Erase
-
-    /// Deletes everything the signed-in person can delete from the cloud, in
-    /// dependency order, including every device and its sealed copy of the
-    /// keys (schema v4). App suggestions are kept. Returns the tables that
-    /// couldn't be cleared.
-    func eraseAllUserData(for user: UUID) async -> [String] {
-        let tables = [
-            "duova_app_credentials", "duova_user_app_preferences", "duova_user_preferences",
-            "duova_workspace_panes", "duova_user_workspaces", "duova_note_app_links", "duova_notes",
-            "duova_vault_items", "duova_user_app_state", "duova_user_app_library",
-            "duova_user_settings", "duova_profiles",
-            "duova_user_key_envelopes", "duova_user_devices",
-        ]
-        var failed: [String] = []
-        for table in tables {
-            do {
-                try await client.from(table).delete()
-                    .eq("user_id", value: user.uuidString.lowercased())
-                    .execute()
-            } catch {
-                failed.append(table)
-            }
-        }
-        keys.removeKey(for: user)
-        vaultKeys.removeKey(for: user)
-        DeviceIdentity.remove(for: user)
-        return failed
-    }
 }

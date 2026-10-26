@@ -79,9 +79,11 @@ final class AppSignInCenter {
 
     // MARK: Lifecycle
 
-    /// Checks every catalog app, one at a time, once this device has the
-    /// account's keys.
-    func start(accountID: UUID?) {
+    /// Once this device has the account's keys, checks only the apps with a
+    /// saved login or session (`priority`, such as favorites, first), one at a
+    /// time. Every other app is checked when its card is opened, so starting
+    /// Duova never reaches out to apps the person hasn't set up.
+    func start(accountID: UUID?, priority: [ServiceID] = []) {
         stop()
         self.accountID = accountID
         guard let accountID else { return }
@@ -91,11 +93,32 @@ final class AppSignInCenter {
             self.recipes = recipes
             // Let the app finish appearing first.
             try? await Task.sleep(for: .seconds(2))
-            for service in ServiceCatalog.all {
+            let saved = await self.appsWithSavedSignIn()
+            let ordered = priority.filter(saved.contains)
+                + ServiceCatalog.all.map(\.id).filter { saved.contains($0) && !priority.contains($0) }
+            for id in ordered {
                 guard !Task.isCancelled, self.accountID == accountID else { return }
-                await self.check(service.id)
+                await self.check(id)
             }
         }
+    }
+
+    /// Apps with something to check: a saved login or session on this device,
+    /// or a saved login in the cloud (one request for all of them).
+    private func appsWithSavedSignIn() async -> Set<ServiceID> {
+        guard let store = loginStore else { return [] }
+        let cloud = await store.cloudReferences() ?? []
+        return Set(ServiceCatalog.all.map(\.id).filter { id in
+            let slug = id.rawValue
+            return store.login(for: slug) != nil || store.sessionCache(for: slug) != nil
+                || cloud.contains(store.reference(slug))
+        })
+    }
+
+    /// Checks an app the first time its card is opened.
+    func checkIfNeeded(_ id: ServiceID) async {
+        guard status(for: id) == .unknown, !checking.contains(id) else { return }
+        await check(id)
     }
 
     func stop() {
@@ -121,9 +144,17 @@ final class AppSignInCenter {
         Task { await check(id) }
     }
 
-    /// Clears the app's session here and in the cloud.
+    /// Clears the app's session, and keeps the app signed out: Duova won't
+    /// sign it back in with the saved login until the person signs in
+    /// themselves or saves the login again. The saved login itself stays
+    /// (delete it from Saved Login to forget it).
     func signOut(of id: ServiceID) async {
         guard let store = loginStore else { return }
+        UserDefaults.standard.set(true, forKey: key("signed-out", store.reference(id.rawValue)))
+        if checking.contains(id) {
+            interrupted.insert(id)
+            running.removeValue(forKey: id)?.cancel()
+        }
         store.clearSessionCache(for: id.rawValue)
         if let dataStore = dataStores[id] {
             await dataStore.removeData(ofTypes: WKWebsiteDataStore.allWebsiteDataTypes(), modifiedSince: .distantPast)
@@ -181,6 +212,10 @@ final class AppSignInCenter {
             $0.method.usesPassword && !$0.identifier.isEmpty && !$0.password.isEmpty
         } == true
         guard hadSession || canFill else {
+            statuses[id] = .notSignedIn
+            return
+        }
+        if !hadSession, UserDefaults.standard.bool(forKey: key("signed-out", store.reference(slug))) {
             statuses[id] = .notSignedIn
             return
         }
@@ -375,9 +410,12 @@ final class AppSignInCenter {
         UserDefaults.standard.set(count, forKey: key("used", ref))
     }
 
+    /// Also called whenever the person signs in or changes the saved login,
+    /// which ends a sign-out too.
     private func resetTries(_ ref: String) {
         UserDefaults.standard.removeObject(forKey: key("used", ref))
         UserDefaults.standard.removeObject(forKey: key("hold", ref))
+        UserDefaults.standard.removeObject(forKey: key("signed-out", ref))
     }
 
     private func hold(_ ref: String) -> String? { UserDefaults.standard.string(forKey: key("hold", ref)) }

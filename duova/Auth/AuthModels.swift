@@ -221,6 +221,8 @@ enum AuthError: LocalizedError, Equatable {
     case codeInvalid
     case passkeyNotRecognized
     case passkeyExists
+    /// Duova's servers aren't configured in this build, so nobody can sign in.
+    case serviceUnavailable
 
     // Messages stay at five words or fewer, and say what to do when possible.
     var errorDescription: String? {
@@ -249,6 +251,7 @@ enum AuthError: LocalizedError, Equatable {
         case .codeInvalid: String(localized: "Code wrong or expired.")
         case .passkeyNotRecognized: String(localized: "Passkey not recognized.")
         case .passkeyExists: String(localized: "Passkey already added.")
+        case .serviceUnavailable: String(localized: "Sign-in unavailable. Update Duova.")
         }
     }
 }

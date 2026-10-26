@@ -25,6 +25,9 @@ final class AuthController {
         static let accounts = "accounts"
         static let session = "session"
         static let links = "identity-links"
+        static let biometricWanted = "biometric-signin-wanted"
+        /// 2: the saved Face ID / Touch ID sign-in holds a set-aside session, never a password.
+        static let biometricFormat = "biometric-signin-format"
         static func settings(_ id: UUID) -> String { "settings-\(id.uuidString)" }
         static func avatar(_ id: UUID) -> String { "avatar-\(id.uuidString)" }
     }
@@ -52,8 +55,14 @@ final class AuthController {
     @ObservationIgnored private var backgroundedAt: Date?
     @ObservationIgnored private let passkeys = PasskeyAuthenticator()
     /// Duova's account service (Supabase Auth). nil when the backend isn't
-    /// configured, in which case accounts live on this device only.
+    /// configured; then nobody can sign in unless this is a preview or test.
     @ObservationIgnored private let cloud: CloudAuthService?
+    /// Accounts kept on this device only. Previews and tests ask for it
+    /// explicitly; a build without its server never falls back to it.
+    @ObservationIgnored private let localOnly: Bool
+    /// The last sign-out still ending its server session. Every new sign-in
+    /// waits for it, so an old sign-out can't land on the new session.
+    @ObservationIgnored private var pendingSignOut: Task<Void, Never>?
 
     /// What the server currently allows. Buttons for sign-in methods the server
     /// hasn't turned on stay hidden.
@@ -67,9 +76,11 @@ final class AuthController {
     /// `usesCloud: false` keeps accounts on this device only (used by previews and tests).
     init(store: SecureStore = .shared, usesCloud: Bool = true) {
         self.store = store
+        localOnly = !usesCloud
         cloud = usesCloud ? CloudAuthService() : nil
         vault = CredentialVault(store: store)
         restoreSession()
+        removeOldBiometricSignIn()
         refreshBiometricSignIn()
     }
 
@@ -85,12 +96,12 @@ final class AuthController {
 
     /// Accounts are held by Duova's servers (rather than only on this device).
     var usesCloud: Bool { cloud != nil }
-    var appleSignInAvailable: Bool { cloud == nil || capabilities.apple }
+    var appleSignInAvailable: Bool { cloud == nil ? localOnly : capabilities.apple }
     /// Passkeys come from the server when it's configured. Signing up with one
     /// first proves the email with a code, because the server only lets a
     /// signed-in account add a passkey.
-    var passkeySignInAvailable: Bool { cloud == nil || capabilities.passkeys }
-    var passkeySignUpAvailable: Bool { cloud == nil || capabilities.passkeys }
+    var passkeySignInAvailable: Bool { cloud == nil ? localOnly : capabilities.passkeys }
+    var passkeySignUpAvailable: Bool { cloud == nil ? localOnly : capabilities.passkeys }
     /// Email codes (sign-in, confirmation, password reset) need the server.
     var emailCodesAvailable: Bool { cloud != nil }
 
@@ -106,6 +117,7 @@ final class AuthController {
         let normalized = EmailNormalizer.normalize(email)
         guard EmailNormalizer.isValid(normalized) else { throw AuthError.invalidEmail }
         try ensureNotLockedOut()
+        let cloud = try accountService()
         guard !isWorking else { throw AuthError.busy }
         isWorking = true
         defer { isWorking = false }
@@ -156,7 +168,7 @@ final class AuthController {
             outcome = .created
         }
 
-        if rememberWithBiometrics { saveBiometricSignIn(email: normalized, password: password) }
+        if rememberWithBiometrics { rememberBiometricSignIn() }
         return outcome
     }
 
@@ -167,6 +179,7 @@ final class AuthController {
         _ cloud: CloudAuthService, email: String, password: String, intent: AuthIntent,
         acceptedTerms: Bool, rememberWithBiometrics: Bool
     ) async throws -> SubmitOutcome {
+        await finishPendingSignOut()
         let outcome: SubmitOutcome
         switch intent {
         case .signIn:
@@ -196,7 +209,7 @@ final class AuthController {
                 outcome = .created
             }
         }
-        if rememberWithBiometrics { saveBiometricSignIn(email: email, password: password) }
+        if rememberWithBiometrics { rememberBiometricSignIn() }
         return outcome
     }
 
@@ -210,6 +223,7 @@ final class AuthController {
         guard !isWorking else { throw AuthError.busy }
         isWorking = true
         defer { isWorking = false }
+        await finishPendingSignOut()
 
         switch purpose {
         case .confirmSignUp:
@@ -247,6 +261,7 @@ final class AuthController {
         guard !isWorking else { throw AuthError.busy }
         isWorking = true
         defer { isWorking = false }
+        await finishPendingSignOut()
 
         let kind: CloudAuthService.CodeKind = switch purpose {
         case .confirmSignUp: .signUp
@@ -266,6 +281,8 @@ final class AuthController {
         switch purpose {
         case .resetPassword:
             try await cloud.updatePassword(to: password ?? "")
+            // A new password ends every other session, including one kept for Face ID / Touch ID.
+            await cloud.signOutOtherSessions()
         case .passkeySignUp:
             do {
                 try await cloud.registerPasskey()
@@ -280,8 +297,8 @@ final class AuthController {
         let savedPassword = purpose == .resetPassword || purpose == .confirmSignUp ? password : nil
         let found = try await adopt(user, fallbackEmail: normalized, password: savedPassword)
         beginSession(for: found)
-        if rememberWithBiometrics, let savedPassword {
-            saveBiometricSignIn(email: normalized, password: savedPassword)
+        if rememberWithBiometrics, savedPassword != nil {
+            rememberBiometricSignIn()
         } else if purpose == .resetPassword {
             disableBiometricSignIn()
         }
@@ -298,6 +315,7 @@ final class AuthController {
         guard !isWorking else { throw AuthError.busy }
         isWorking = true
         defer { isWorking = false }
+        await finishPendingSignOut()
         try await cloud.sendPhoneCode(to: normalized)
     }
 
@@ -310,6 +328,7 @@ final class AuthController {
         guard !isWorking else { throw AuthError.busy }
         isWorking = true
         defer { isWorking = false }
+        await finishPendingSignOut()
         let user: CloudUser
         do {
             user = try await cloud.verifyPhone(code: digits, phone: normalized)
@@ -350,7 +369,7 @@ final class AuthController {
     /// Signs out and opens "Forgot password" for this account's email.
     func signOutToResetPassword() {
         requestedResetEmail = account?.email
-        signOut()
+        signOut(keepingBiometricSignIn: false)
     }
 
     /// The email the sign-in screen should reset, once.
@@ -402,34 +421,76 @@ final class AuthController {
 
     // MARK: Biometric sign-in
 
+    /// What Face ID / Touch ID unlocks: the session set aside at sign-out,
+    /// never the password. Accounts kept on the device (previews and tests)
+    /// have no session, so the biometric check alone opens them.
     private struct BiometricPayload: Codable {
+        var accountID: UUID
         var email: String
-        var password: String
+        var refreshToken: String?
     }
 
+    private var biometricSignInWanted: Bool {
+        store.load(Bool.self, name: Name.biometricWanted) ?? false
+    }
+
+    /// Signed in: whether sign-out will keep the session for Face ID / Touch ID.
+    /// Signed out: whether a kept session is waiting.
     func refreshBiometricSignIn() {
-        biometricSignInReady = biometricKind.isBiometric && BiometricSignInVault.exists()
+        biometricSignInReady = biometricKind.isBiometric
+            && (account != nil ? biometricSignInWanted : BiometricSignInVault.exists())
     }
 
-    private func saveBiometricSignIn(email: String, password: String) {
+    private func rememberBiometricSignIn() {
         guard biometricKind.isBiometric else { return }
+        try? store.save(true, name: Name.biometricWanted)
+        refreshBiometricSignIn()
+    }
+
+    /// Earlier versions kept the account password behind biometrics. That
+    /// copy is deleted; a signed-in person keeps the setting, and their next
+    /// sign-out keeps a session instead.
+    private func removeOldBiometricSignIn() {
+        guard store.load(Int.self, name: Name.biometricFormat) != 2, BiometricSignInVault.exists() else { return }
+        BiometricSignInVault.remove()
+        if account != nil { try? store.save(true, name: Name.biometricWanted) }
+    }
+
+    /// Puts the current session behind Face ID / Touch ID instead of ending
+    /// it. Returns false (and changes nothing) if it couldn't be kept safely.
+    private func keepSessionForBiometrics(_ account: DuovaAccount) -> Bool {
+        guard biometricKind.isBiometric, biometricSignInWanted else { return false }
+        let token: String?
+        if let cloud {
+            guard let current = cloud.currentRefreshToken() else { return false }
+            token = current
+        } else {
+            guard localOnly else { return false }
+            token = nil
+        }
         do {
-            let payload = try JSONEncoder().encode(BiometricPayload(email: email, password: password))
-            let sealed = try store.seal(payload, context: "biometric-signin")
-            try BiometricSignInVault.save(sealed)
+            let payload = try JSONEncoder().encode(
+                BiometricPayload(accountID: account.id, email: account.email, refreshToken: token))
+            try BiometricSignInVault.save(try store.seal(payload, context: "biometric-signin"))
+            try store.save(2, name: Name.biometricFormat)
         } catch {
             BiometricSignInVault.remove()
+            return false
         }
-        refreshBiometricSignIn()
+        cloud?.forgetSessionLocally()
+        return true
     }
 
-    /// Removes the saved Touch ID / Face ID sign-in.
+    /// Turns off Face ID / Touch ID sign-in.
     func disableBiometricSignIn() {
         BiometricSignInVault.remove()
+        store.remove(name: Name.biometricWanted)
         refreshBiometricSignIn()
     }
 
-    /// Signs in using the saved details after a successful biometric check.
+    /// Signs back in with the session kept at sign-out, after a successful
+    /// biometric check. The kept session is used once; the next sign-out keeps
+    /// a new one.
     func signInWithBiometrics() async -> BiometricResult {
         guard phase == .signedOut, !isWorking else { return .cancelled }
         let reason = String(localized: "Sign in to Duova with \(biometricKind.title).")
@@ -448,13 +509,34 @@ final class AuthController {
                 disableBiometricSignIn()
                 return .failed(String(localized: "Use password to reset \(biometricKind.title)."))
             }
+            isWorking = true
+            defer { isWorking = false }
             do {
-                _ = try await submit(email: payload.email, password: payload.password, intent: .signIn)
+                if let token = payload.refreshToken {
+                    guard let cloud else { return .unavailable }
+                    await finishPendingSignOut()
+                    let user = try await cloud.resumeSession(refreshToken: token)
+                    guard user.id == payload.accountID else {
+                        await cloud.signOut()
+                        disableBiometricSignIn()
+                        return .failed(String(localized: "Saved sign-in outdated. Use password."))
+                    }
+                    BiometricSignInVault.remove()
+                    beginSession(for: try await adopt(user, fallbackEmail: payload.email, password: nil))
+                } else {
+                    guard localOnly, let found = loadAccounts().first(where: { $0.id == payload.accountID }) else {
+                        disableBiometricSignIn()
+                        return .failed(String(localized: "Saved sign-in outdated. Use password."))
+                    }
+                    BiometricSignInVault.remove()
+                    beginSession(for: found)
+                }
                 return .success
-            } catch AuthError.wrongPassword, AuthError.wrongCredentials {
+            } catch AuthError.wrongCredentials {
                 disableBiometricSignIn()
                 return .failed(String(localized: "Saved sign-in outdated. Use password."))
             } catch let error as AuthError {
+                // Kept for next time: the session may still be good once back online.
                 return .failed(error.errorDescription ?? String(localized: "Something went wrong. Try again."))
             } catch {
                 return .failed(String(localized: "Something went wrong. Try again."))
@@ -471,7 +553,7 @@ final class AuthController {
         userID: String, email: String?, fullName: PersonNameComponents?,
         identityToken: Data?, rawNonce: String
     ) async throws {
-        guard let cloud else {
+        guard let cloud = try accountService() else {
             try signInWithAppleOnDevice(userID: userID, email: email, fullName: fullName)
             return
         }
@@ -481,6 +563,7 @@ final class AuthController {
         guard !isWorking else { throw AuthError.busy }
         isWorking = true
         defer { isWorking = false }
+        await finishPendingSignOut()
         let user = try await cloud.signInWithApple(idToken: token, rawNonce: rawNonce)
         let formatted = fullName.map { PersonNameComponentsFormatter.localizedString(from: $0, style: .default) } ?? ""
         let found = try await adopt(
@@ -530,7 +613,7 @@ final class AuthController {
         let state = try? await ASAuthorizationAppleIDProvider().credentialState(forUserID: userID)
         if state == .revoked || state == .notFound {
             removeLinks { $0.kind == .apple && $0.key == userID }
-            if !accountHasPassword && !hasPasskey(for: account?.id) { signOut() }
+            if !accountHasPassword && !hasPasskey(for: account?.id) { signOut(keepingBiometricSignIn: false) }
         }
     }
 
@@ -539,6 +622,7 @@ final class AuthController {
     /// Creates an account protected by a new passkey (no password).
     func signUpWithPasskey(email: String, acceptedTerms: Bool) async throws {
         guard cloud == nil else { throw AuthError.passkeyUnavailable }
+        guard localOnly else { throw AuthError.serviceUnavailable }
         let normalized = EmailNormalizer.normalize(email)
         guard EmailNormalizer.isValid(normalized) else { throw AuthError.invalidEmail }
         guard acceptedTerms else { throw AuthError.termsNotAccepted }
@@ -574,7 +658,8 @@ final class AuthController {
         isWorking = true
         defer { isWorking = false }
 
-        if let cloud {
+        if let cloud = try accountService() {
+            await finishPendingSignOut()
             let user = try await cloud.signInWithPasskey()
             let found = try await adopt(user, fallbackEmail: "", password: nil)
             beginSession(for: found)
@@ -612,7 +697,20 @@ final class AuthController {
         let result = await BiometricAuthenticator.authenticate(
             reason: String(localized: "Confirm to delete your Duova account."))
         guard result == .success else { return result }
-        await eraseCloudData(for: account)
+        if let cloud {
+            guard !isWorking else { return .failed(AuthError.busy.errorDescription ?? "") }
+            isWorking = true
+            defer { isWorking = false }
+            do {
+                // The server only deletes for a freshly issued session.
+                try await cloud.refreshSession()
+                try await cloud.deleteAccount()
+            } catch {
+                return .failed((error as? AuthError)?.errorDescription ?? String(localized: "Couldn't delete. Try again."))
+            }
+        } else if !localOnly {
+            return .unavailable
+        }
         eraseAccount(account)
         return .success
     }
@@ -647,11 +745,11 @@ final class AuthController {
         guard let current = account else { return }
         switch await cloud.sessionState() {
         case .invalid:
-            signOut()
+            signOut(keepingBiometricSignIn: false)
         case .unknown:
             break
         case .valid(let user):
-            guard user.id == current.id else { signOut(); return }
+            guard user.id == current.id else { signOut(keepingBiometricSignIn: false); return }
             await mirrorServerEmail(user, into: current)
             await refreshPasskeys()
         }
@@ -669,7 +767,6 @@ final class AuthController {
             vault.remove(forEmail: current.email)
         }
         try? saveAccount(updated)
-        disableBiometricSignIn()
     }
 
     // MARK: Private cloud data
@@ -725,28 +822,54 @@ final class AuthController {
 
     // MARK: Session
 
+    /// Signs out on this device. With Face ID / Touch ID sign-in on, the
+    /// session is kept behind biometrics instead of ended.
     func signOut() {
+        signOut(keepingBiometricSignIn: true)
+    }
+
+    private func signOut(keepingBiometricSignIn keep: Bool) {
+        let kept = keep && account.map(keepSessionForBiometrics) == true
         store.remove(name: Name.session)
         endSession()
         if let cloud {
             cloudPasskeys = []
-            Task { await cloud.signOut() }
+            if !kept {
+                let previous = pendingSignOut
+                pendingSignOut = Task {
+                    await previous?.value
+                    await cloud.signOut()
+                }
+            }
         }
     }
 
-    /// Erases the account and everything stored for it. Requires the password.
-    func deleteAccount(password: String) async throws {
-        guard let account else { throw AuthError.accountUnavailable }
-        guard await checkPassword(password) else { throw AuthError.wrongPassword }
-        await eraseCloudData(for: account)
-        eraseAccount(account)
+    private func finishPendingSignOut() async {
+        guard let pending = pendingSignOut else { return }
+        await pending.value
+        if pendingSignOut == pending { pendingSignOut = nil }
     }
 
-    /// Clears the account's private data from the cloud (and its key from
-    /// this device) while the session is still valid.
-    private func eraseCloudData(for account: DuovaAccount) async {
-        guard cloud != nil, let store = privateStore else { return }
-        _ = await store.eraseAllUserData(for: account.id)
+    /// Deletes the account on Duova's servers (the sign-in identity and, with
+    /// it, every row of its data), then everything on this device. Nothing
+    /// local is erased unless the server confirmed the deletion.
+    func deleteAccount(password: String) async throws {
+        guard let account else { throw AuthError.accountUnavailable }
+        if let cloud = try accountService() {
+            guard !isWorking else { throw AuthError.busy }
+            isWorking = true
+            defer { isWorking = false }
+            // Checks the password with the server, and gets the fresh session deletion needs.
+            do {
+                try await cloud.verify(email: account.email, password: password)
+            } catch AuthError.wrongCredentials {
+                throw AuthError.wrongPassword
+            }
+            try await cloud.deleteAccount()
+        } else {
+            guard await checkPassword(password) else { throw AuthError.wrongPassword }
+        }
+        eraseAccount(account)
     }
 
     private func eraseAccount(_ account: DuovaAccount) {
@@ -756,10 +879,11 @@ final class AuthController {
         removeLinks { $0.accountID == account.id }
         store.removeAll(containing: account.id.uuidString)
         store.remove(name: Name.session)
-        BiometricSignInVault.remove()
+        KeychainKeyProvider().removeKey(for: account.id)
+        KeychainKeyProvider.vault.removeKey(for: account.id)
+        DeviceIdentity.remove(for: account.id)
         endSession()
-        refreshBiometricSignIn()
-        if let cloud { Task { await cloud.signOut() } }
+        disableBiometricSignIn()
     }
 
     // MARK: App Lock
@@ -850,7 +974,7 @@ final class AuthController {
         isWorking = true
         defer { isWorking = false }
 
-        if let cloud {
+        if let cloud = try accountService() {
             do {
                 try await cloud.verify(email: current.email, password: password)
             } catch AuthError.wrongCredentials {
@@ -888,7 +1012,7 @@ final class AuthController {
         isWorking = true
         defer { isWorking = false }
 
-        if let cloud {
+        if let cloud = try accountService() {
             do {
                 try await cloud.verify(email: account.email, password: current)
             } catch AuthError.wrongCredentials {
@@ -911,7 +1035,6 @@ final class AuthController {
         } catch {
             throw AuthError.storageFailure
         }
-        disableBiometricSignIn()
     }
 
     /// Stores a new profile photo (already-chosen image data), or removes it when `nil`.
@@ -937,8 +1060,8 @@ final class AuthController {
         guard let session = store.load(SessionRecord.self, name: Name.session),
               let found = loadAccounts().first(where: { $0.id == session.accountID }),
               cloud != nil
-                || vault.record(forEmail: found.email)?.accountID == found.id
-                || loadLinks().contains(where: { $0.accountID == found.id })
+                || localOnly && (vault.record(forEmail: found.email)?.accountID == found.id
+                    || loadLinks().contains(where: { $0.accountID == found.id }))
         else {
             store.remove(name: Name.session)
             return
@@ -962,6 +1085,7 @@ final class AuthController {
         try? store.save(SessionRecord(accountID: found.id, startedAt: started), name: Name.session)
         loadAvatar(for: found)
         phase = .active
+        refreshBiometricSignIn()
     }
 
     private func endSession() {
@@ -972,6 +1096,7 @@ final class AuthController {
         avatar = nil
         backgroundedAt = nil
         phase = .signedOut
+        refreshBiometricSignIn()
     }
 
     private func loadAvatar(for found: DuovaAccount) {
@@ -1016,6 +1141,14 @@ final class AuthController {
         guard let account, let record = vault.record(forEmail: account.email) else { return false }
         let derived = await PasswordHasher.derive(password: password, salt: record.salt, iterations: record.iterations)
         return PasswordHasher.constantTimeEqual(derived, record.hash)
+    }
+
+    /// Duova's servers, or nil for accounts kept on this device (previews and
+    /// tests only). A build without its server configuration can't sign in.
+    private func accountService() throws -> CloudAuthService? {
+        if let cloud { return cloud }
+        guard localOnly else { throw AuthError.serviceUnavailable }
+        return nil
     }
 
     private func ensureNotLockedOut() throws {

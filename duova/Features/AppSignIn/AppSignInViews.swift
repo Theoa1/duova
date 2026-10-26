@@ -101,6 +101,7 @@ struct AppSignInSection: View {
         .padding(16)
         .glassEffect(.regular, in: RoundedRectangle(cornerRadius: DuovaMetrics.cornerRadius, style: .continuous))
         .pageSheet(isPresented: $showSheet) { AppSignInSheet(service: service) }
+        .task { await center.checkIfNeeded(service.id) }
     }
 
     private var footer: String {

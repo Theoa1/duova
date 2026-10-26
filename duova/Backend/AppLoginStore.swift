@@ -182,6 +182,14 @@ struct AppLoginStore {
         return login
     }
 
+    /// The references of every app with a saved login in the cloud, or nil offline.
+    func cloudReferences() async -> Set<String>? {
+        guard let client else { return nil }
+        let rows: [[String: String]]? = try? await client.from(Self.table)
+            .select("app_ref").eq("user_id", value: userKey).execute().value
+        return rows.map { Set($0.compactMap { $0["app_ref"] }) }
+    }
+
     func remove(for slug: String) async {
         store.remove(name: localName(slug))
         guard let client else { return }

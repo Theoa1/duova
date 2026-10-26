@@ -183,14 +183,14 @@ File: `duova_schema_v4_devices_app_signin.sql`. Run it **after** v2 and v3. It's
 
 Uses the v2 tables `duova_user_devices` and `duova_user_key_envelopes`.
 
-1. The first device makes the account's two keys and seals a copy to itself.
+1. The first device makes the account's two keys and keeps them only after claiming the account's key commitment (v5). It then seals a copy to itself.
 2. A new device signs in, registers its public key (X25519) and shows a twelve-digit code, made from its own key with PBKDF2-SHA256 (200,000 rounds). It never makes keys of its own.
 3. A device with the keys shows the request with the same code. After Face ID / Touch ID / passcode, it seals both keys to the new device with HPKE (X25519, HKDF-SHA256, ChaCha20-Poly1305), bound to account, device and key version.
 4. The new device opens the envelope and keeps the keys only if they match the account's `key_fingerprint` (an HMAC computed with the keys, safe to store).
 
 The server stores only public keys and sealed envelopes, so it can't read the keys. The approving device recomputes the code from the stored public key and the person compares both screens, so a key the server swaps in shows a different code. The code is long and slow to compute so the server can't search for a fake key with the same code. Format checks in the database don't make a key trustworthy; the code comparison does.
 
-**Lost every device?** "Lost your other devices?" on the waiting screen erases the encrypted data nobody can open any more, forgets every device, and makes new keys.
+**Lost every device?** "Lost your other devices?" on the waiting screen erases the encrypted data nobody can open any more, forgets every device, and commits new keys, all in one server transaction (v5). The device replaces its keys only after that succeeds.
 
 **Removing a device** stops it from being approved again. A device that already received keys keeps them until "Start over" makes new ones. Full revocation (rotating keys and re-encrypting everything) isn't built yet.
 
@@ -200,8 +200,24 @@ The server stores only public keys and sealed envelopes, so it can't read the ke
 
 - **A database row can't redirect a password.** The sites, login page and session-cookie names always come from the app; a row can only update selectors, the check page and the note, and can only make support stricter. The page script types a password only into a real password field on the app's own sites.
 - **Fallback field finder.** When no selector matches, Duova finds the fields itself, and on the second try asks Apple's on-device model. The model only sees field descriptions, never the login.
+- **Signing out of an app sticks.** Sign out clears the app's session and keeps it signed out: Duova won't sign it back in with the saved login until the person signs in themselves or saves the login again. Deleting the saved login (Saved Login, Delete) forgets the credentials.
+- **Only apps that are set up are checked.** At launch Duova checks just the apps with a saved login or session, favorites first. Other apps are checked when their card is opened.
 - **Three tries, all by Duova.** Duova tries the saved login up to three times (kept across launches); there is no "Try again". After the third it shows "We couldn't sign in." and stops until the person signs in themselves or changes the saved login.
 - **Second steps go to the person.** A code or approval step is never automated; the card shows "MFA needed".
 - **Sessions stay on the device.** After signing in, the app's cookies are kept double-encrypted on this device only, never in the cloud. The web views themselves store nothing on disk.
 - **Google apps** (Gmail, Docs, Slides, Maps, YouTube): Google blocks sign-in inside apps, so their cards say so instead of trying. Excel signs in through Microsoft's two-step page (email, then password).
 
+## v5 add-on: account deletion, key commitment, preference revisions
+
+File: `duova_schema_v5_account_safety.sql`. Run it **after** v2, v3 and v4. It's safe to run again, and it stops with an error if an earlier part is missing. Apply to dev, not production.
+
+- **Deleting an account deletes the sign-in identity.** `duova_delete_my_account()` deletes the caller's Supabase Auth user. Every Duova table references `auth.users` with `ON DELETE CASCADE`, so all of the account's rows go in the same transaction, along with Auth's own sessions, identities and passkeys. The app checks the password with the server first (or refreshes the session for accounts without one), and the function refuses an access token older than five minutes. The app erases its own copy only after the server confirms.
+- **One key set per account.** `duova_account_key_commitments` holds the version and fingerprint of the account's keys. A new account's first device must insert this row before it keeps any keys, so two devices signing in at once can't each make their own keys; the loser waits for approval. A trigger rejects key envelopes that don't match the committed keys. Existing accounts are committed to the keys their newest envelopes use.
+- **Start over is all-or-nothing.** `duova_start_over_keys(...)` checks no other device started over first, erases the unreadable data, forgets every device and envelope, and commits the new keys in one transaction.
+- **Preferences don't overwrite each other.** `duova_save_preferences(expected_revision, account, apps)` saves account and per-app preferences together, only if the stored `revision` is still the one the device last read. Otherwise it returns -1 and changes nothing; the app merges (each device's own changes win for the settings it changed, favorites merge item by item) and saves again.
+
+### App changes that go with it
+
+- **No local-only accounts in real builds.** Without its Supabase configuration, Duova can't sign in at all (it says "Sign-in unavailable. Update Duova."). Accounts kept on the device exist only in previews and tests that ask for them.
+- **Face ID / Touch ID sign-in keeps no password.** Signing out with it on puts the session behind biometrics on this device instead of ending it (the item is device-only, needs a passcode and is invalidated if enrolled biometrics change). Signing in with Face ID resumes that session once; the next sign-out keeps a new one. Copies of the password from earlier versions are deleted. A password reset ends every other session, including a kept one.
+- **Sign-out finishes before the next sign-in.** Ending the server session runs in the background, and every sign-in waits for it first.

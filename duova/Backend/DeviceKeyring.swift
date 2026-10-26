@@ -187,13 +187,16 @@ struct LinkedDevice: Identifiable, Equatable {
 /// Decides how this device gets the account's encryption keys, and lets a
 /// device that has them approve new ones.
 ///
-/// - The first device makes the keys and seals a copy to itself.
+/// - The first device makes the keys, and keeps them only once it has claimed
+///   the account's one key commitment (schema v5). Two new devices signing in
+///   at once can't both win, so the account never ends up with two key sets.
 /// - A new device registers its public key and waits. It never makes keys of
 ///   its own, so it can't start a second, incompatible set.
 /// - A device with the keys approves it (after Face ID / Touch ID / passcode
 ///   and checking the twelve-digit code), sealing both keys to the new device.
 /// - If every device with the keys is gone, "Start over" erases the encrypted
-///   data nobody can open any more and makes new keys.
+///   data nobody can open any more and commits new keys, in one server
+///   transaction. This device's keys change only after that succeeds.
 @MainActor
 @Observable
 final class DeviceKeyring {
@@ -216,6 +219,8 @@ final class DeviceKeyring {
 
     private var accountID: UUID?
     private var keyVersion = 1
+    /// The committed key version this device last saw; 0 when there's none yet.
+    private var committedVersion = 0
     private let master = KeychainKeyProvider()
     private let vault = KeychainKeyProvider.vault
 
@@ -223,6 +228,29 @@ final class DeviceKeyring {
 
     private static let devicesTable = "duova_user_devices"
     private static let envelopesTable = "duova_user_key_envelopes"
+    private static let commitmentsTable = "duova_account_key_commitments"
+
+    private struct CommitmentRow: Codable {
+        let userID: UUID
+        let keyVersion: Int
+        let keyFingerprint: String
+        let deviceID: UUID
+        enum CodingKeys: String, CodingKey {
+            case userID = "user_id", keyVersion = "key_version", keyFingerprint = "key_fingerprint"
+            case deviceID = "device_id"
+        }
+    }
+
+    private struct StartOverParams: Encodable {
+        let seenVersion: Int
+        let newVersion: Int
+        let newFingerprint: String
+        let newDevice: UUID
+        enum CodingKeys: String, CodingKey {
+            case seenVersion = "seen_version", newVersion = "new_version"
+            case newFingerprint = "new_fingerprint", newDevice = "new_device"
+        }
+    }
 
     private struct DeviceRow: Codable {
         let userID: UUID
@@ -287,12 +315,18 @@ final class DeviceKeyring {
         }
 
         let envelopes: [EnvelopeRow]
+        let commitment: CommitmentRow?
         do {
             envelopes = try await client.from(Self.envelopesTable)
                 .select("user_id,device_id,key_version,wrapped_key_ciphertext,wrapping_algorithm,key_fingerprint")
                 .eq("user_id", value: accountID.uuidString.lowercased())
                 .order("key_version", ascending: false)
                 .execute().value
+            let commitments: [CommitmentRow] = try await client.from(Self.commitmentsTable)
+                .select("user_id,key_version,key_fingerprint,device_id")
+                .eq("user_id", value: accountID.uuidString.lowercased())
+                .execute().value
+            commitment = commitments.first
         } catch {
             // Offline: keys already here keep working; a new device waits.
             if hasLocalKeys { markReady(accountID) } else { state = .offline }
@@ -303,14 +337,22 @@ final class DeviceKeyring {
             return
         }
 
-        guard let latest = envelopes.first else {
-            await becomeFirstDevice(accountID, identity: identity, client: client, version: 1)
+        // The account's one key set: its commitment, or for an account from
+        // before schema v5, its newest envelopes.
+        let canonical = commitment.map { (version: $0.keyVersion, fingerprint: $0.keyFingerprint as String?) }
+            ?? envelopes.first.map { (version: $0.keyVersion, fingerprint: $0.keyFingerprint) }
+        guard let canonical else {
+            await becomeFirstDevice(accountID, identity: identity, client: client)
             return
         }
-        keyVersion = latest.keyVersion
-        let current = envelopes.filter { $0.keyVersion == latest.keyVersion }
+        keyVersion = canonical.version
+        committedVersion = commitment?.keyVersion ?? 0
+        let current = envelopes.filter { $0.keyVersion == canonical.version }
 
-        if hasLocalKeys, let localPrint = localFingerprint(), localPrint == latest.keyFingerprint {
+        if hasLocalKeys, let localPrint = localFingerprint(), localPrint == canonical.fingerprint {
+            if commitment == nil, (try? await commit(version: canonical.version, fingerprint: localPrint, device: identity.deviceID, client: client)) != nil {
+                committedVersion = canonical.version
+            }
             if !current.contains(where: { $0.deviceID == identity.deviceID }) {
                 try? await register(identity, client: client)
                 try? await sealKeys(to: identity.deviceID, publicKey: identity.publicKeyText, client: client)
@@ -321,6 +363,7 @@ final class DeviceKeyring {
         }
 
         if let mine = current.first(where: { $0.deviceID == identity.deviceID }),
+           mine.keyFingerprint == canonical.fingerprint,
            (try? install(mine, identity: identity, user: accountID)) == true {
             markReady(accountID)
             await refreshDevices()
@@ -343,19 +386,50 @@ final class DeviceKeyring {
         return DeviceKeyEnvelope.fingerprint(master: m, vault: v, user: accountID)
     }
 
-    private func becomeFirstDevice(_ accountID: UUID, identity: DeviceIdentity, client: SupabaseClient, version: Int) async {
+    /// Makes the account's keys, but keeps them only after claiming the
+    /// account's key commitment. A device that loses the claim to another
+    /// one keeps nothing and waits to be approved instead.
+    private func becomeFirstDevice(_ accountID: UUID, identity: DeviceIdentity, client: SupabaseClient) async {
+        let newMaster = SymmetricKey(size: .bits256)
+        let newVault = SymmetricKey(size: .bits256)
+        let fingerprint = DeviceKeyEnvelope.fingerprint(master: newMaster, vault: newVault, user: accountID)
         do {
-            try master.createKey(for: accountID)
-            try vault.createKey(for: accountID)
-            keyVersion = version
-            try await register(identity, client: client)
-            try await sealKeys(to: identity.deviceID, publicKey: identity.publicKeyText, client: client)
-            markReady(accountID)
-            await refreshDevices()
+            try await commit(version: 1, fingerprint: fingerprint, device: identity.deviceID, client: client)
         } catch {
-            // The keys work here even if the server copy failed; it's retried next launch.
-            if hasLocalKeys { markReady(accountID) } else { state = .offline }
+            if Self.isConflict(error) {
+                try? await register(identity, client: client)
+                state = .waitingForApproval(code: identity.safetyCode)
+            } else {
+                state = .offline
+            }
+            return
         }
+        do {
+            try master.install(newMaster, for: accountID)
+            try vault.install(newVault, for: accountID)
+        } catch {
+            state = .offline
+            return
+        }
+        keyVersion = 1
+        committedVersion = 1
+        // Retried on the next launch if the server is unreachable now.
+        try? await register(identity, client: client)
+        try? await sealKeys(to: identity.deviceID, publicKey: identity.publicKeyText, client: client)
+        markReady(accountID)
+        await refreshDevices()
+    }
+
+    private func commit(version: Int, fingerprint: String, device: UUID, client: SupabaseClient) async throws {
+        guard let accountID else { return }
+        try await client.from(Self.commitmentsTable)
+            .insert(CommitmentRow(userID: accountID, keyVersion: version, keyFingerprint: fingerprint, deviceID: device))
+            .execute()
+    }
+
+    /// Another device already claimed the row (unique violation).
+    private static func isConflict(_ error: Error) -> Bool {
+        (error as? PostgrestError)?.code == "23505"
     }
 
     private func register(_ identity: DeviceIdentity, client: SupabaseClient) async throws {
@@ -510,14 +584,37 @@ final class DeviceKeyring {
         await refreshDevices()
     }
 
-    /// For when no device with the keys is left: erases the encrypted data
-    /// nobody can open any more, forgets every device, and makes new keys here.
+    /// For when no device with the keys is left. The server erases the
+    /// encrypted data nobody can open any more, forgets every device and
+    /// commits new keys, all in one transaction (schema v5). Only after that
+    /// does this device replace its keys, and its own identity is kept
+    /// throughout, so a failure at any step loses nothing.
     func startOver() async throws {
         guard let accountID, let client = client(for: accountID) else { throw AuthError.network }
-        let failed = await PrivateDataStore(client: client).eraseAllUserData(for: accountID)
-        guard failed.isEmpty else { throw AuthError.serverRejected(String(localized: "Couldn't erase. Try again.")) }
         guard let identity = try? DeviceIdentity.load(for: accountID) else { throw AuthError.storageFailure }
-        await becomeFirstDevice(accountID, identity: identity, client: client, version: 1)
-        guard state == .ready else { throw AuthError.network }
+        let newMaster = SymmetricKey(size: .bits256)
+        let newVault = SymmetricKey(size: .bits256)
+        let version = max(keyVersion, committedVersion) + 1
+        let fingerprint = DeviceKeyEnvelope.fingerprint(master: newMaster, vault: newVault, user: accountID)
+        do {
+            try await client.rpc("duova_start_over_keys", params: StartOverParams(
+                seenVersion: committedVersion, newVersion: version,
+                newFingerprint: fingerprint, newDevice: identity.deviceID)).execute()
+        } catch {
+            if error is URLError { throw AuthError.network }
+            throw AuthError.serverRejected(String(localized: "Couldn't erase. Try again."))
+        }
+        do {
+            try master.install(newMaster, for: accountID)
+            try vault.install(newVault, for: accountID)
+        } catch {
+            throw AuthError.storageFailure
+        }
+        keyVersion = version
+        committedVersion = version
+        try await register(identity, client: client)
+        try await sealKeys(to: identity.deviceID, publicKey: identity.publicKeyText, client: client)
+        markReady(accountID)
+        await refreshDevices()
     }
 }

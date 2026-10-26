@@ -46,8 +46,8 @@ struct CloudPasskey: Identifiable, Equatable, Sendable {
 struct CloudAuthService {
     private let client: SupabaseClient
 
-    /// nil when Supabase isn't configured (no `DuovaDev.xcconfig`), in which
-    /// case Duova falls back to local-only accounts.
+    /// nil when Supabase isn't configured (no `DuovaDev.xcconfig`). Nobody can
+    /// sign in then; Duova never quietly switches to on-device accounts.
     init?() {
         guard let client = DuovaBackend.client else { return nil }
         self.client = client
@@ -247,6 +247,60 @@ struct CloudAuthService {
     /// Ends the session on this device. Other devices stay signed in.
     func signOut() async {
         try? await client.auth.signOut(scope: .local)
+    }
+
+    /// Gets a freshly issued access token, which the server requires for
+    /// deleting the account.
+    func refreshSession() async throws {
+        do { _ = try await client.auth.refreshSession() } catch { throw Self.map(error) }
+    }
+
+    /// The current session's refresh token, for Face ID / Touch ID sign-in to keep.
+    func currentRefreshToken() -> String? {
+        client.auth.currentSession?.refreshToken
+    }
+
+    /// Takes the session off this device without ending it on the server.
+    /// Only after its refresh token is kept safely, or the account is gone.
+    func forgetSessionLocally() {
+        DuovaAuthStorage.shared.forgetLocally()
+    }
+
+    /// Ends every other session of this account, on every device.
+    func signOutOtherSessions() async {
+        try? await client.auth.signOut(scope: .others)
+    }
+
+    /// Resumes a session kept with `currentRefreshToken`. The token is single-use:
+    /// the server hands back a new one with the new session.
+    func resumeSession(refreshToken: String) async throws -> CloudUser {
+        do {
+            return Self.user(try await client.auth.refreshSession(refreshToken: refreshToken).user)
+        } catch let error as Auth.AuthError {
+            if case .api(_, let code, _, _) = error,
+               [ErrorCode.refreshTokenNotFound.rawValue, ErrorCode.refreshTokenAlreadyUsed.rawValue,
+                ErrorCode.sessionNotFound.rawValue, ErrorCode.sessionExpired.rawValue,
+                ErrorCode.userNotFound.rawValue].contains(code.rawValue) {
+                throw AuthError.wrongCredentials
+            }
+            throw Self.map(error)
+        } catch {
+            throw Self.map(error)
+        }
+    }
+
+    /// Deletes the account on the server: the Auth user and, by cascade, every
+    /// Duova row that belongs to it (schema v5). Needs a session issued in the
+    /// last few minutes. Throws unless the server confirmed the deletion.
+    func deleteAccount() async throws {
+        do {
+            try await client.rpc("duova_delete_my_account").execute()
+        } catch {
+            if error is URLError { throw AuthError.network }
+            throw AuthError.serverRejected(String(localized: "Couldn't delete. Try again."))
+        }
+        // The user no longer exists, so there's no session to end on the server.
+        DuovaAuthStorage.shared.forgetLocally()
     }
 
     // MARK: Helpers

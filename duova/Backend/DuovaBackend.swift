@@ -47,7 +47,8 @@ enum DuovaBackend {
 
         return SupabaseClient(
             supabaseURL: configuration.url,
-            supabaseKey: configuration.key
+            supabaseKey: configuration.key,
+            options: SupabaseClientOptions(auth: .init(storage: DuovaAuthStorage.shared))
         )
     }
 }
