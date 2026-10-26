@@ -27,23 +27,26 @@ struct LaunchScene: View {
             }
             .allowsHitTesting(false)
 
-            ForEach(f.icons) { icon in
-                ServiceIcon(id: icon.service.id, size: g.tileSize)
-                    .saturation(0.9)
-                    .drawingGroup()
-                    .shadow(color: icon.service.accent.opacity(theme.isDark ? 0.30 : 0.18),
-                            radius: g.tileSize * 0.22)
-                    .scaleEffect(icon.scale)
-                    .opacity(icon.opacity)
-                    .position(icon.position)
-            }
-
-            DuovaMark(style: theme.isDark ? .dark : .light)
+            // The Duova icon sits beneath the travelling icons, so you watch
+            // each app fly into it and merge rather than vanish behind it.
+            DuovaMark(style: theme.markStyle)
                 .frame(width: g.heroSize, height: g.heroSize)
                 .scaleEffect(f.heroScale)
                 .blur(radius: f.heroBlur)
                 .opacity(f.heroOpacity)
                 .position(g.heroCenter)
+
+            ForEach(f.icons) { icon in
+                ServiceIcon(id: icon.service.id, size: g.tileSize)
+                    .drawingGroup()
+                    .shadow(color: icon.service.accent.opacity(theme.isDark ? 0.34 : 0.20),
+                            radius: g.tileSize * 0.22)
+                    .scaleEffect(icon.scale)
+                    // Blur grows as the icon melts into the Duova mark.
+                    .blur(radius: icon.melt * g.tileSize * 0.16)
+                    .opacity(icon.opacity)
+                    .position(icon.position)
+            }
 
             if timeline.showsText {
                 textBlock(frame: f, geometry: g)
@@ -77,8 +80,8 @@ struct LaunchScene: View {
                 Path(ellipseIn: rect),
                 with: .radialGradient(
                     Gradient(colors: [
-                        DuovaPalette.blue.opacity(0.30 * f.glow * strength),
-                        DuovaPalette.purple.opacity(0.14 * f.glow * strength),
+                        theme.glowColors[0].opacity(0.30 * f.glow * strength),
+                        theme.glowColors[1].opacity(0.14 * f.glow * strength),
                         .clear
                     ]),
                     center: center,
@@ -97,8 +100,8 @@ struct LaunchScene: View {
                 path,
                 with: .linearGradient(
                     Gradient(colors: [
-                        DuovaPalette.blue.opacity(0.45 * (1 - f.ring)),
-                        DuovaPalette.purple.opacity(0.45 * (1 - f.ring))
+                        theme.accentColors[0].opacity(0.45 * (1 - f.ring)),
+                        theme.accentColors[theme.accentColors.count - 1].opacity(0.45 * (1 - f.ring))
                     ]),
                     startPoint: CGPoint(x: rect.minX, y: rect.minY),
                     endPoint: CGPoint(x: rect.maxX, y: rect.maxY)

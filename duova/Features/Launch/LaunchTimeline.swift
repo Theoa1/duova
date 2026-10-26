@@ -7,6 +7,8 @@ struct LaunchIcon: Identifiable {
     var position: CGPoint
     var scale: CGFloat
     var opacity: Double
+    /// 0...1 progress of the icon melting into the Duova mark (drives blur).
+    var melt: Double
     /// Recent positions, oldest first, ending at `position`. Drives the light trail.
     var trail: [CGPoint]
     var trailOpacity: Double
@@ -32,7 +34,7 @@ struct LaunchFrame {
 /// Phases (per blueprint §17 and the design brief):
 /// 1. **Appear**: the glow fades in and icons float in from the edges.
 /// 2. **Converge**: icons drift inward on curved paths; the Duova icon sharpens.
-/// 3. **Morph**: icons dissolve into light trails; the icon pulses.
+/// 3. **Morph**: icons shrink and melt into the Duova icon, which pulses.
 /// 4. **Reveal**: the wordmark and tagline fade in, then the screen hands off.
 ///
 /// Because the frame is a function of elapsed time only, it renders identically
@@ -69,10 +71,10 @@ struct LaunchTimeline {
         switch variant {
         case .full:
             appear = 0...0.40
-            converge = 0.36...1.02
-            morph = 1.02...1.30
-            reveal = 1.12...1.46
-            total = 1.70
+            converge = 0.36...1.06
+            morph = 1.06...1.42
+            reveal = 1.20...1.56
+            total = 1.80
             iconCount = 10
         case .quick:
             appear = 0...0.14
@@ -120,6 +122,7 @@ struct LaunchTimeline {
                 position: now.position,
                 scale: now.scale,
                 opacity: now.opacity,
+                melt: now.melt,
                 trail: trail,
                 trailOpacity: now.trailOpacity
             ))
@@ -144,6 +147,7 @@ struct LaunchTimeline {
         var position: CGPoint
         var scale: CGFloat
         var opacity: Double
+        var melt: Double
         var trailOpacity: Double
     }
 
@@ -162,7 +166,7 @@ struct LaunchTimeline {
         let a = Motion.easeOut(Motion.progress(t, in: appearStart...appear.upperBound))
 
         let convergeSpan = converge.upperBound - converge.lowerBound
-        let convergeStart = converge.lowerBound + Double(index) * convergeSpan * 0.25 / Double(n)
+        let convergeStart = converge.lowerBound + Double(index) * convergeSpan * 0.40 / Double(n)
         let c = Motion.easeInOut(Motion.progress(t, in: convergeStart...converge.upperBound))
 
         let m = Motion.progress(t, in: morph)
@@ -190,10 +194,12 @@ struct LaunchTimeline {
             y: linear.y + (dx / length) * bow
         )
 
-        let scale = CGFloat((0.55 + 0.45 * a) * Motion.lerp(1, 0.55, c) * Motion.lerp(1, 0.2, Motion.easeIn(m)))
-        let opacity = a * (1 - Motion.easeIn(m)) * (1 - 0.25 * c)
+        // Icons stay clearly visible all the way in, then shrink and melt into the mark.
+        let melt = Motion.easeIn(m)
+        let scale = CGFloat((0.55 + 0.45 * a) * Motion.lerp(1, 0.56, c) * Motion.lerp(1, 0.10, melt))
+        let opacity = a * (1 - Motion.clamp(melt / 0.72, 0, 1))
         let trailOpacity = sin(Double.pi * c) * 0.55 * (1 - m)
 
-        return Placement(position: position, scale: scale, opacity: opacity, trailOpacity: trailOpacity)
+        return Placement(position: position, scale: scale, opacity: opacity, melt: melt, trailOpacity: trailOpacity)
     }
 }

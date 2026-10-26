@@ -4,7 +4,7 @@ import SwiftUI
 /// service and offers only actions that work today (favoriting).
 struct ServiceDetailView: View {
     @Environment(\.duovaTheme) private var theme
-    @Environment(\.dismiss) private var dismiss
+    @Environment(\.closeSheet) private var closeSheet
     @Environment(AppSession.self) private var session
 
     let service: Service
@@ -13,8 +13,8 @@ struct ServiceDetailView: View {
         NavigationStack {
             ScrollView {
                 VStack(spacing: 20) {
-                    ServiceIcon(id: service.id, size: 88)
-                        .shadow(color: service.accent.opacity(0.25), radius: 18, y: 6)
+                    ServiceIcon(id: service.id, size: 96)
+                        .shadow(color: service.accent.opacity(0.30), radius: 20, y: 6)
                         .accessibilityHidden(true)
 
                     VStack(spacing: 6) {
@@ -36,8 +36,7 @@ struct ServiceDetailView: View {
                     }
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .padding(16)
-                    .background(RoundedRectangle(cornerRadius: 18, style: .continuous).fill(theme.card))
-                    .overlay(RoundedRectangle(cornerRadius: 18, style: .continuous).strokeBorder(theme.border, lineWidth: 1))
+                    .glassEffect(.regular, in: RoundedRectangle(cornerRadius: DuovaMetrics.cornerRadius, style: .continuous))
 
                     Button {
                         session.toggleFavorite(service.id)
@@ -46,8 +45,13 @@ struct ServiceDetailView: View {
                             session.isFavorite(service.id) ? "Remove from favorites" : "Add to favorites",
                             systemImage: session.isFavorite(service.id) ? "star.fill" : "star"
                         )
+                        .frame(maxWidth: .infinity)
                     }
-                    .buttonStyle(DuovaPrimaryButtonStyle())
+                    .buttonStyle(.glassProminent)
+                    .buttonBorderShape(.roundedRectangle(radius: DuovaMetrics.cornerRadius))
+                    .controlSize(.large)
+                    .tint(theme.accent)
+                    .foregroundStyle(theme.onAccent)
 
                     Text("\(service.name) is an independent product. Duova is not affiliated with, sponsored by, or endorsed by its owner.")
                         .font(.footnote)
@@ -63,7 +67,7 @@ struct ServiceDetailView: View {
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .confirmationAction) {
-                    Button("Done") { dismiss() }
+                    Button("Done") { closeSheet() }
                 }
             }
         }

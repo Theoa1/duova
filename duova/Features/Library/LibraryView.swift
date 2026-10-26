@@ -31,8 +31,11 @@ enum LibraryFilter: Hashable, Identifiable {
 struct LibraryView: View {
     @Environment(\.duovaTheme) private var theme
     @Environment(AppSession.self) private var session
+    @Environment(\.bookPosture) private var book
+    @Environment(\.navigationAreaWidth) private var navigationAreaWidth
 
-    @State private var query = ""
+    /// Owned by the app shell, which hosts the search field.
+    @Binding var query: String
     @State private var filter: LibraryFilter = .all
     @State private var selected: Service?
 
@@ -49,47 +52,84 @@ struct LibraryView: View {
 
     var body: some View {
         NavigationStack {
-            ScrollView {
-                VStack(alignment: .leading, spacing: 16) {
-                    FilterRow(selection: $filter)
+            // The list is full screen in every orientation: cards run to within
+            // a small margin of both side edges and scroll under the system's
+            // glass bars and Duova's navigation buttons. Only the star on cards
+            // in the right-hand column moves in, clear of those buttons.
+            GeometryReader { geo in
+                let insets = geo.safeAreaInsets
+                let width = geo.size.width - DuovaMetrics.screenMargin * 2 + insets.leading + insets.trailing
+                // Where the middle of the screen falls, measured from the start of the cards.
+                let middle = (geo.size.width + insets.leading + insets.trailing) / 2 - DuovaMetrics.screenMargin
 
-                    if results.isEmpty {
-                        emptyState
-                            .frame(maxWidth: .infinity)
-                            .padding(.top, 40)
-                    } else {
-                        LazyVGrid(
-                            columns: [GridItem(.adaptive(minimum: 320), spacing: 12)],
-                            spacing: 12
-                        ) {
-                            ForEach(results) { service in
-                                ServiceRow(
-                                    service: service,
-                                    isFavorite: session.isFavorite(service.id),
-                                    open: { selected = service },
-                                    toggleFavorite: { session.toggleFavorite(service.id) }
-                                )
-                            }
-                        }
-                        .padding(.horizontal, 16)
-                    }
-
-                    Text("Services shown here are candidates under review. Names and logos belong to their owners and are shown for identification only.")
-                        .font(.footnote)
-                        .foregroundStyle(theme.textSecondary)
-                        .padding(.horizontal, 16)
-                        .padding(.top, 8)
+                ScrollView {
+                    content(availableWidth: width, middle: middle)
                 }
-                .padding(.vertical, 8)
+                .scrollIndicators(.hidden)
+                .contentMargins(.horizontal, DuovaMetrics.screenMargin, for: .scrollContent)
+                .scrollDismissesKeyboard(.interactively)
+                .safeAreaBar(edge: .top, spacing: 0) {
+                    FilterRow(selection: $filter)
+                        .padding(.vertical, 6)
+                }
+                .ignoresSafeArea(.container, edges: .horizontal)
             }
-            .scrollDismissesKeyboard(.interactively)
             .background { DuovaBackdrop() }
             .navigationTitle("Apps")
-            .searchable(text: $query, prompt: "Search services")
-            .sheet(item: $selected) { service in
-                ServiceDetailView(service: service)
-                    .presentationDetents([.medium, .large])
-                    .presentationDragIndicator(.visible)
+        }
+        .pageSheet(item: $selected, resizable: true) { service in
+            ServiceDetailView(service: service)
+        }
+    }
+
+    @ViewBuilder
+    private func content(availableWidth: CGFloat, middle: CGFloat) -> some View {
+        VStack(alignment: .leading, spacing: 16) {
+            if results.isEmpty {
+                emptyState
+                    .frame(maxWidth: .infinity)
+                    .padding(.top, 40)
+            } else if book?.axis == .horizontal {
+                // Open side by side: the services are laid out like a book, the
+                // first half on the left page and the rest on the right, with the
+                // fold in the gutter between them so no card ever sits across it.
+                let gutter = DuovaMetrics.screenMargin * 2
+                let leftWidth = max(0, middle - gutter / 2)
+                let rightWidth = max(0, availableWidth - leftWidth - gutter)
+                let half = (results.count + 1) / 2
+                HStack(alignment: .top, spacing: gutter) {
+                    grid(Array(results.prefix(half)), width: leftWidth, touchesRightEdge: false)
+                        .frame(width: leftWidth)
+                    grid(Array(results.dropFirst(half)), width: rightWidth, touchesRightEdge: true)
+                        .frame(width: rightWidth)
+                }
+            } else {
+                grid(results, width: availableWidth, touchesRightEdge: true)
+            }
+        }
+        .padding(.vertical, 8)
+    }
+
+    /// Column count follows the real width, so portrait, landscape, iPad and
+    /// each page of an open device get a sensible grid.
+    private func grid(_ services: [Service], width: CGFloat, touchesRightEdge: Bool) -> some View {
+        let spacing = DuovaMetrics.gridSpacing
+        let columns = max(1, Int((width + spacing) / (300 + spacing)))
+        return LazyVGrid(
+            columns: Array(repeating: GridItem(.flexible(), spacing: spacing), count: columns),
+            spacing: spacing
+        ) {
+            ForEach(Array(services.enumerated()), id: \.element.id) { index, service in
+                // Cards in the right-hand column sit under the navigation
+                // buttons, so their star moves in to stay reachable.
+                let isRightColumn = touchesRightEdge && index % columns == columns - 1
+                ServiceRow(
+                    service: service,
+                    starInset: isRightColumn ? max(0, navigationAreaWidth - DuovaMetrics.screenMargin) : 0,
+                    isFavorite: session.isFavorite(service.id),
+                    open: { selected = service },
+                    toggleFavorite: { session.toggleFavorite(service.id) }
+                )
             }
         }
     }
@@ -122,29 +162,41 @@ private struct FilterRow: View {
 
     var body: some View {
         ScrollView(.horizontal, showsIndicators: false) {
-            HStack(spacing: 8) {
-                ForEach(LibraryFilter.ordered) { item in
-                    let isSelected = item == selection
-                    Button {
-                        selection = item
-                    } label: {
-                        Text(item.title)
-                            .font(.subheadline.weight(.semibold))
-                            .foregroundStyle(isSelected ? Color.white : theme.textPrimary)
-                            .padding(.horizontal, 14)
-                            .frame(minHeight: 44)
-                            .background(
-                                Capsule().fill(isSelected ? Color(hex: 0x3F72C4) : theme.card)
-                            )
-                            .overlay(Capsule().strokeBorder(theme.border, lineWidth: isSelected ? 0 : 1))
-                            .contentShape(Capsule())
+            GlassEffectContainer(spacing: 8) {
+                HStack(spacing: 8) {
+                    ForEach(LibraryFilter.ordered) { item in
+                        chip(item)
                     }
-                    .buttonStyle(.plain)
-                    .accessibilityAddTraits(isSelected ? .isSelected : [])
                 }
             }
-            .padding(.horizontal, 16)
+            .padding(.leading, DuovaMetrics.screenMargin)
+            .padding(.trailing, DuovaMetrics.screenMargin)
         }
+        .scrollIndicators(.hidden)
+        .scrollClipDisabled()
+    }
+
+    private func chip(_ item: LibraryFilter) -> some View {
+        let isSelected = item == selection
+        let shape = RoundedRectangle(cornerRadius: DuovaMetrics.cornerRadius, style: .continuous)
+        return Button {
+            selection = item
+        } label: {
+            Text(item.title)
+                .font(.subheadline.weight(.semibold))
+                .foregroundStyle(isSelected ? theme.onAccent : theme.textPrimary)
+                .padding(.horizontal, 14)
+                .frame(minHeight: 44)
+                .glassEffect(
+                    isSelected
+                        ? .regular.tint(theme.accent.opacity(0.75)).interactive()
+                        : .regular.interactive(),
+                    in: shape
+                )
+                .contentShape(shape)
+        }
+        .buttonStyle(.plain)
+        .accessibilityAddTraits(isSelected ? .isSelected : [])
     }
 }
 
@@ -154,40 +206,49 @@ struct StatusBadge: View {
 
     var body: some View {
         Label(status.title, systemImage: status.symbol)
-            .font(.caption.weight(.semibold))
+            .font(.caption2.weight(.semibold))
             // Darker text in light mode keeps the label readable on its pale tint.
-            .foregroundStyle(status.tint.mix(with: .black, by: theme.isDark ? 0 : 0.5))
-            .padding(.horizontal, 10)
-            .padding(.vertical, 5)
-            .background(Capsule().fill(status.tint.opacity(0.16)))
+            .foregroundStyle(theme.tint(for: status).mix(with: theme.isDark ? .white : .black, by: theme.isDark ? 0.25 : 0.45))
+            .padding(.horizontal, 8)
+            .padding(.vertical, 3)
+            .background(
+                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                    .fill(theme.tint(for: status).opacity(theme.isDark ? 0.22 : 0.16))
+            )
             .fixedSize(horizontal: false, vertical: true)
     }
 }
 
+/// Library card: a liquid-glass surface holding a glass icon, the service name,
+/// a quiet category line and a compact status tag, with a separate favorite control.
 private struct ServiceRow: View {
     @Environment(\.duovaTheme) private var theme
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
 
     let service: Service
+    /// Extra space after the star, keeping it clear of the navigation buttons.
+    var starInset: CGFloat = 0
     let isFavorite: Bool
     let open: () -> Void
     let toggleFavorite: () -> Void
 
     var body: some View {
-        HStack(spacing: 4) {
+        let shape = RoundedRectangle(cornerRadius: DuovaMetrics.cornerRadius, style: .continuous)
+
+        HStack(spacing: 2) {
             Button(action: open) {
                 label
                     .frame(maxWidth: .infinity, alignment: .leading)
-                    .contentShape(Rectangle())
+                    .contentShape(shape)
             }
-            .buttonStyle(.plain)
+            .buttonStyle(CardPressStyle())
             .accessibilityElement(children: .combine)
             .accessibilityHint(Text("Shows details"))
 
             Button(action: toggleFavorite) {
                 Image(systemName: isFavorite ? "star.fill" : "star")
-                    .font(.title3)
-                    .foregroundStyle(isFavorite ? DuovaPalette.amber : theme.textSecondary)
+                    .font(.body)
+                    .foregroundStyle(isFavorite ? (theme.style == .duova ? DuovaPalette.amber : theme.textPrimary) : theme.textSecondary)
                     .frame(width: 44, height: 44)
                     .contentShape(Rectangle())
             }
@@ -195,43 +256,52 @@ private struct ServiceRow: View {
             .accessibilityLabel(Text(isFavorite ? "Remove \(service.name) from favorites" : "Add \(service.name) to favorites"))
         }
         .padding(.leading, 12)
-        .padding(.trailing, 4)
+        .padding(.trailing, 4 + starInset)
         .padding(.vertical, 10)
-        .background(RoundedRectangle(cornerRadius: 18, style: .continuous).fill(theme.card))
-        .overlay(RoundedRectangle(cornerRadius: 18, style: .continuous).strokeBorder(theme.border, lineWidth: 1))
+        .glassEffect(.regular, in: shape)
     }
 
     @ViewBuilder
     private var label: some View {
         if dynamicTypeSize.isAccessibilitySize {
             VStack(alignment: .leading, spacing: 10) {
-                ServiceIcon(id: service.id, size: 56)
+                ServiceIcon(id: service.id, size: 52)
                 details
             }
         } else {
-            HStack(spacing: 14) {
-                ServiceIcon(id: service.id, size: 52)
+            HStack(spacing: 12) {
+                ServiceIcon(id: service.id, size: 48)
                 details
             }
         }
     }
 
     private var details: some View {
-        VStack(alignment: .leading, spacing: 4) {
+        VStack(alignment: .leading, spacing: 3) {
             Text(service.name)
                 .font(.headline)
                 .foregroundStyle(theme.textPrimary)
             Text(service.category.longTitle)
-                .font(.subheadline)
+                .font(.caption)
                 .foregroundStyle(theme.textSecondary)
             StatusBadge(status: service.status)
-                .padding(.top, 2)
+                .padding(.top, 3)
         }
     }
 }
 
+/// Gentle press feedback for glass cards.
+private struct CardPressStyle: ButtonStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .opacity(configuration.isPressed ? 0.7 : 1)
+            .scaleEffect(configuration.isPressed ? 0.985 : 1)
+            .animation(.easeOut(duration: 0.12), value: configuration.isPressed)
+    }
+}
+
 #Preview {
-    LibraryView()
+    LibraryView(query: .constant(""))
         .environment(AppSession(defaults: UserDefaults(suiteName: "duova.preview") ?? .standard))
         .duovaTheme()
 }

@@ -107,11 +107,13 @@ enum CompatibilityStatus: String, CaseIterable {
 
     var tint: Color {
         switch self {
-        case .underReview: DuovaPalette.amber
+        // Under review is a neutral, in-progress state, so it uses the brand
+        // indigo rather than a warning color.
+        case .underReview: DuovaPalette.indigo
         case .fullOptimization: DuovaPalette.emerald
         case .enhancedWeb: DuovaPalette.blue
         case .limitedWeb: DuovaPalette.amber
-        case .nativeHandoff: DuovaPalette.indigo
+        case .nativeHandoff: DuovaPalette.teal
         case .unsupported: DuovaPalette.pink
         }
     }

@@ -1,40 +1,43 @@
 import Foundation
 import Observation
 
-/// App-wide, locally persisted state: which launch variant to show, whether
-/// the welcome step is done, and the user's favorite services.
+/// App-wide, locally persisted state: which launch variant to show and the
+/// signed-in account's favorite services.
+///
+/// Favorites belong to an account and are stored encrypted (`SecureStore`), so a
+/// second account on the same device never sees them. Launch history is not
+/// account data and stays in plain defaults.
 ///
 /// Everything here is local, so startup never waits on the network and the
 /// native shell works offline (blueprint §2, §18).
 @Observable
 final class AppSession {
-    private enum Key {
-        static let welcomeCompleted = "duova.session.welcomeCompleted"
-        static let favorites = "duova.session.favorites"
-    }
-
     let launchVariant: LaunchVariant
-    private(set) var hasCompletedWelcome: Bool
     /// Favorite service IDs in the order they were added.
-    private(set) var favorites: [ServiceID]
+    private(set) var favorites: [ServiceID] = []
 
-    @ObservationIgnored private let defaults: UserDefaults
+    @ObservationIgnored private let store: SecureStore
     @ObservationIgnored private let history: LaunchHistory
+    @ObservationIgnored private var accountID: UUID?
 
-    init(defaults: UserDefaults = .standard, now: Date = .now) {
-        self.defaults = defaults
+    init(accountID: UUID? = nil, store: SecureStore = .shared,
+         defaults: UserDefaults = .standard, now: Date = .now) {
+        self.store = store
         history = LaunchHistory(defaults: defaults)
         launchVariant = history.resolveVariant(now: now)
         history.recordLaunch(now: now)
-
-        hasCompletedWelcome = defaults.bool(forKey: Key.welcomeCompleted)
-        let stored = defaults.stringArray(forKey: Key.favorites) ?? []
-        favorites = stored.compactMap(ServiceID.init(rawValue:))
+        activate(accountID: accountID)
     }
 
-    func completeWelcome() {
-        hasCompletedWelcome = true
-        defaults.set(true, forKey: Key.welcomeCompleted)
+    /// Loads the favorites for `accountID` (or clears them when signed out).
+    func activate(accountID: UUID?) {
+        self.accountID = accountID
+        guard let accountID else {
+            favorites = []
+            return
+        }
+        let stored = store.load([String].self, name: Self.favoritesName(accountID)) ?? []
+        favorites = stored.compactMap(ServiceID.init(rawValue:))
     }
 
     func isFavorite(_ id: ServiceID) -> Bool {
@@ -47,12 +50,15 @@ final class AppSession {
         } else {
             favorites.append(id)
         }
-        defaults.set(favorites.map(\.rawValue), forKey: Key.favorites)
+        guard let accountID else { return }
+        try? store.save(favorites.map(\.rawValue), name: Self.favoritesName(accountID))
     }
 
-    /// Call when the scene is no longer active so the next launch can choose
+    /// Call whenever the scene stops being active so the next launch can choose
     /// the resume variant.
     func recordInactive(now: Date = .now) {
         history.recordInactive(now: now)
     }
+
+    private static func favoritesName(_ id: UUID) -> String { "favorites-\(id.uuidString)" }
 }

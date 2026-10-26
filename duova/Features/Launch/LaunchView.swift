@@ -8,9 +8,14 @@ import SwiftUI
 /// a tap or the VoiceOver default action, and is simplified for Reduce Motion.
 struct LaunchView: View {
     let variant: LaunchVariant
+    /// Forces the simplified sequence (the in-app "Reduced" motion setting).
+    /// iOS Reduce Motion always applies regardless of this value.
+    var reducesMotion = false
     let onFinish: () -> Void
 
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.bookPosture) private var book
+    @Environment(\.accessibilityReduceMotion) private var systemReduceMotion
+    private var reduceMotion: Bool { systemReduceMotion || reducesMotion }
     @State private var startDate = Date()
     @State private var hasFinished = false
 
@@ -25,15 +30,24 @@ struct LaunchView: View {
                 width: geo.size.width + insets.leading + insets.trailing,
                 height: geo.size.height + insets.top + insets.bottom
             )
-            TimelineView(.animation) { context in
-                LaunchScene(
-                    timeline: timeline,
-                    t: context.date.timeIntervalSince(startDate),
-                    size: full,
-                    insets: insets
-                )
+            // In a book arrangement the animation plays on the first page, so
+            // the icon never straddles the seam.
+            let stage = stageSize(full: full)
+            let pageInsets = pageInsets(insets)
+            ZStack(alignment: .topLeading) {
+                DuovaBackdrop()
+                    .frame(width: full.width, height: full.height)
+                TimelineView(.animation) { context in
+                    LaunchScene(
+                        timeline: timeline,
+                        t: context.date.timeIntervalSince(startDate),
+                        size: stage,
+                        insets: pageInsets
+                    )
+                }
+                .frame(width: stage.width, height: stage.height)
             }
-            .frame(width: full.width, height: full.height)
+            .frame(width: full.width, height: full.height, alignment: .topLeading)
             .offset(x: -insets.leading, y: -insets.top)
         }
         .dynamicTypeSize(...DynamicTypeSize.accessibility2)
@@ -49,6 +63,20 @@ struct LaunchView: View {
             guard !Task.isCancelled else { return }
             finish()
         }
+    }
+
+    private func stageSize(full: CGSize) -> CGSize {
+        guard let book else { return full }
+        return book.axis == .horizontal
+            ? CGSize(width: full.width / 2, height: full.height)
+            : CGSize(width: full.width, height: full.height / 2)
+    }
+
+    private func pageInsets(_ insets: EdgeInsets) -> EdgeInsets {
+        guard let book else { return insets }
+        return book.axis == .horizontal
+            ? EdgeInsets(top: insets.top, leading: insets.leading, bottom: insets.bottom, trailing: 0)
+            : EdgeInsets(top: insets.top, leading: insets.leading, bottom: 0, trailing: insets.trailing)
     }
 
     private func finish() {

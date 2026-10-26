@@ -3,8 +3,11 @@ import SwiftUI
 enum DuovaMarkStyle {
     case dark
     case light
-    /// Monochrome artwork used for the tinted app-icon appearance.
+    /// Monochrome artwork (white bars on black) used for the tinted app-icon
+    /// appearance and the Black & White theme in dark mode.
     case mono
+    /// Black bars on a white plate: the Black & White theme in light mode.
+    case monoLight
 }
 
 /// The Duova icon: two adjoining vertical bars on a glass plate with a small
@@ -54,10 +57,32 @@ private struct Plate: View {
         case .mono:
             LinearGradient(colors: [Color(hex: 0x16161A), Color(hex: 0x050506)],
                            startPoint: .top, endPoint: .bottom)
+        case .monoLight:
+            LinearGradient(colors: [Color(hex: 0xFFFFFF), Color(hex: 0xF0F0F3)],
+                           startPoint: .top, endPoint: .bottom)
         }
     }
 
     private var borderOpacity: Double { style == .dark ? 0.70 : 0.40 }
+
+    private var borderColors: [Color] {
+        switch style {
+        case .dark, .light:
+            [DuovaPalette.blue.opacity(borderOpacity), DuovaPalette.purple.opacity(borderOpacity)]
+        case .mono:
+            [Color.white.opacity(0.40), Color.white.opacity(0.12)]
+        case .monoLight:
+            [Color.black.opacity(0.28), Color.black.opacity(0.10)]
+        }
+    }
+
+    private var shadowColor: Color {
+        switch style {
+        case .dark: DuovaPalette.blue.opacity(0.30)
+        case .mono: Color.white.opacity(0.10)
+        case .light, .monoLight: Color.black.opacity(0.10)
+        }
+    }
 
     var body: some View {
         let shape = RoundedRectangle(
@@ -77,11 +102,10 @@ private struct Plate: View {
                     )
                 )
             }
-            if !fullBleed && style != .mono {
+            if !fullBleed {
                 shape.strokeBorder(
                     LinearGradient(
-                        colors: [DuovaPalette.blue.opacity(borderOpacity),
-                                 DuovaPalette.purple.opacity(borderOpacity)],
+                        colors: borderColors,
                         startPoint: .topLeading,
                         endPoint: .bottomTrailing
                     ),
@@ -90,8 +114,7 @@ private struct Plate: View {
             }
         }
         .shadow(
-            color: fullBleed ? .clear
-                : (style == .dark ? DuovaPalette.blue.opacity(0.30) : Color.black.opacity(0.10)),
+            color: fullBleed ? .clear : shadowColor,
             radius: side * 0.12,
             y: style == .dark ? 0 : side * 0.04
         )
@@ -103,13 +126,19 @@ private struct Bars: View {
     let side: CGFloat
 
     private var leftColors: [Color] {
-        style == .mono ? [Color.white.opacity(0.96), Color.white.opacity(0.72)]
-                       : [DuovaPalette.teal, DuovaPalette.blue]
+        switch style {
+        case .mono: [Color.white.opacity(0.96), Color.white.opacity(0.72)]
+        case .monoLight: [Color(hex: 0x2C2C30), Color(hex: 0x0A0A0C)]
+        case .dark, .light: [DuovaPalette.teal, DuovaPalette.blue]
+        }
     }
 
     private var rightColors: [Color] {
-        style == .mono ? [Color.white.opacity(0.78), Color.white.opacity(0.50)]
-                       : [DuovaPalette.indigo, DuovaPalette.purple]
+        switch style {
+        case .mono: [Color.white.opacity(0.78), Color.white.opacity(0.50)]
+        case .monoLight: [Color(hex: 0x5C5C61), Color(hex: 0x2C2C30)]
+        case .dark, .light: [DuovaPalette.indigo, DuovaPalette.purple]
+        }
     }
 
     var body: some View {
@@ -155,6 +184,7 @@ private struct Tag: View {
         case .dark: Color.white.opacity(0.82)
         case .light: Color(hex: 0x0F172A, opacity: 0.62)
         case .mono: Color.white.opacity(0.7)
+        case .monoLight: Color(hex: 0x0A0A0A, opacity: 0.6)
         }
     }
 
