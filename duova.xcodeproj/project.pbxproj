@@ -3,11 +3,13 @@
 	archiveVersion = 1;
 	classes = {
 	};
-	objectVersion = 90;
+	objectVersion = 110;
 	objects = {
 
 /* Begin PBXFileReference section */
 		000000000000000000000120 /* duova.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = duova.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		E48E53FE308FA15C00129DE9 /* DUOVA_CONVERSATION.md */ = {isa = PBXFileReference; lastKnownFileType = net.daringfireball.markdown; path = DUOVA_CONVERSATION.md; sourceTree = "<group>"; };
+		E48E5400308FA40200129DE9 /* DUOVA_PROJECT_BLUEPRINT.md */ = {isa = PBXFileReference; lastKnownFileType = net.daringfireball.markdown; path = DUOVA_PROJECT_BLUEPRINT.md; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFileSystemSynchronizedRootGroup section */
@@ -31,6 +33,8 @@
 			isa = PBXGroup;
 			children = (
 				000000000000000000000010 /* duova */,
+				E48E53FE308FA15C00129DE9 /* DUOVA_CONVERSATION.md */,
+				E48E5400308FA40200129DE9 /* DUOVA_PROJECT_BLUEPRINT.md */,
 				000000000000000000000020 /* Products */,
 			);
 			sourceTree = "<group>";
@@ -72,7 +76,7 @@
 			attributes = {
 				BuildIndependentTargetsInParallel = 1;
 				LastSwiftUpdateCheck = 2630;
-				LastUpgradeCheck = 2700;
+				LastUpgradeCheck = 2710;
 				TargetAttributes = {
 					000000000000000100000000 = {
 						CreatedOnToolsVersion = 26.3;
@@ -88,7 +92,7 @@
 			);
 			mainGroup = 000000000000000000000001;
 			minimizedProjectReferenceProxies = 1;
-			preferredProjectObjectVersion = 90;
+			preferredProjectObjectVersion = 110;
 			productRefGroup = 000000000000000000000020 /* Products */;
 			projectDirPath = "";
 			projectRoot = "";
@@ -151,6 +155,7 @@
 				COPY_PHASE_STRIP = NO;
 				DEAD_CODE_STRIPPING = YES;
 				DEBUG_INFORMATION_FORMAT = dwarf;
+				DEVELOPMENT_TEAM = AV7KJ9849H;
 				DRIVERKIT_DEPLOYMENT_TARGET = 27.0;
 				ENABLE_STRICT_OBJC_MSGSEND = YES;
 				ENABLE_TESTABILITY = YES;
@@ -221,6 +226,7 @@
 				COPY_PHASE_STRIP = NO;
 				DEAD_CODE_STRIPPING = YES;
 				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
+				DEVELOPMENT_TEAM = AV7KJ9849H;
 				DRIVERKIT_DEPLOYMENT_TARGET = 27.0;
 				ENABLE_NS_ASSERTIONS = NO;
 				ENABLE_STRICT_OBJC_MSGSEND = YES;
@@ -253,7 +259,6 @@
 				"CODE_SIGN_IDENTITY[sdk=macosx*]" = "Apple Development";
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
-				DEVELOPMENT_TEAM = AV7KJ9849H;
 				ENABLE_APP_SANDBOX = YES;
 				ENABLE_PREVIEWS = YES;
 				ENABLE_USER_SELECTED_FILES = readonly;
@@ -292,7 +297,6 @@
 			buildSettings = {
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
-				DEVELOPMENT_TEAM = AV7KJ9849H;
 				ENABLE_APP_SANDBOX = YES;
 				ENABLE_PREVIEWS = YES;
 				ENABLE_USER_SELECTED_FILES = readonly;
