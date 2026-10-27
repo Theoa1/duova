@@ -2,6 +2,7 @@ import AuthenticationServices
 import Foundation
 import Observation
 import UIKit
+import WebKit
 
 /// Owns the Duova account session.
 ///
@@ -877,6 +878,12 @@ final class AuthController {
         let remaining = loadAccounts().filter { $0.id != account.id }
         try? store.save(remaining, name: Name.accounts)
         removeLinks { $0.accountID == account.id }
+        // The account's website sessions (one store per launched service) go
+        // too. Their identifiers are read before the encrypted names are gone.
+        let webStores = ServiceSessionRegistry.identifiers(for: account.id, store: store)
+        Task.detached {
+            for id in webStores { try? await WKWebsiteDataStore.remove(forIdentifier: id) }
+        }
         store.removeAll(containing: account.id.uuidString)
         store.remove(name: Name.session)
         KeychainKeyProvider().removeKey(for: account.id)

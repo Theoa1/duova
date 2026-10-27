@@ -35,6 +35,7 @@ struct LibraryView<Header: View>: View {
     @Environment(\.duovaTheme) private var theme
     @Environment(AppSession.self) private var session
     @Environment(AppSignInCenter.self) private var signIn
+    @Environment(DuovaLaunchRouteStore.self) private var launchRoute
     @Environment(\.bookPosture) private var book
 
     /// Owned by the app shell, which hosts the search field.
@@ -42,7 +43,6 @@ struct LibraryView<Header: View>: View {
     @ViewBuilder var header: Header
     @State private var filter: LibraryFilter = .all
     @State private var selected: Service?
-    @State private var launched: Service?
 
     private var results: [Service] {
         ServiceCatalog.all.filter { service in
@@ -102,12 +102,6 @@ struct LibraryView<Header: View>: View {
                 launch(service)
             }
         }
-        .overlay {
-            if let launched, let url = launched.launchURL {
-                AppWorkspaceView(service: launched, url: url) { setLaunched(nil) }
-                    .transition(.opacity.combined(with: .scale(scale: 0.96)))
-            }
-        }
     }
 
     /// Tapping an app opens it; one that can't open yet shows its card instead.
@@ -115,13 +109,15 @@ struct LibraryView<Header: View>: View {
         if service.canLaunch { launch(service) } else { selected = service }
     }
 
+    /// Launching hands the whole app to the service. The commitment is written
+    /// first, so a relaunch returns to the service, then the root swaps routes.
     private func launch(_ service: Service) {
         guard service.canLaunch else { return }
-        setLaunched(service)
-    }
-
-    private func setLaunched(_ service: Service?) {
-        withAnimation(.spring(response: 0.38, dampingFraction: 0.9)) { launched = service }
+        if !launchRoute.commit(service.id) {
+            // Couldn't be remembered durably; show the card rather than open
+            // something that wouldn't come back.
+            selected = service
+        }
     }
 
     /// The title row over the filter chips. Hiding the title slides the pair up
@@ -402,5 +398,6 @@ private struct ServiceRow: View {
     }
         .environment(AppSession(defaults: UserDefaults(suiteName: "duova.preview") ?? .standard))
         .environment(AppSignInCenter())
+        .environment(DuovaLaunchRouteStore())
         .duovaTheme()
 }

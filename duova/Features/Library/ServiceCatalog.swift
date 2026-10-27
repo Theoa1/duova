@@ -120,7 +120,7 @@ enum CompatibilityStatus: String, CaseIterable {
 }
 
 /// Stable identifiers for catalog services that currently have a bundled icon.
-enum ServiceID: String, CaseIterable, Identifiable, Hashable {
+enum ServiceID: String, CaseIterable, Identifiable, Hashable, Codable {
     case instagram
     case youtube
     case spotify

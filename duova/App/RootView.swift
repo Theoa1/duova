@@ -16,6 +16,10 @@ struct RootView: View {
     @State private var preferenceSync = PreferenceSync()
     @State private var keyring = DeviceKeyring()
     @State private var appSignIn = AppSignInCenter()
+    @State private var launchRoute: DuovaLaunchRouteStore
+    /// The launched service's live surfaces. Kept across lock, background and
+    /// layout changes; dropped only when the account changes.
+    @State private var immersive: ImmersiveCoordinator?
     @State private var showDeviceLink = false
     @State private var approvingDevice: LinkedDevice?
     /// Requests already shown this launch ("Later" isn't asked again).
@@ -29,9 +33,19 @@ struct RootView: View {
         _auth = State(initialValue: auth)
         _session = State(initialValue: AppSession(accountID: auth.account?.id))
         _servicePreferences = State(initialValue: ServicePreferences(accountID: auth.account?.id))
+        let route = DuovaLaunchRouteStore(accountID: auth.account?.id)
+        _launchRoute = State(initialValue: route)
+        // A committed service reopens directly, with no Duova launch animation.
+        _isLaunching = State(initialValue: route.committedService == nil)
     }
 
     private var reducesMotion: Bool { systemReduceMotion || display.motion == .reduced }
+
+    /// The committed service for the signed-in account, if any.
+    private var immersiveService: ServiceID? {
+        if case .immersive(let service) = launchRoute.route(for: auth.account?.id) { return service }
+        return nil
+    }
 
     var body: some View {
         ZStack {
@@ -55,13 +69,20 @@ struct RootView: View {
         .environment(display)
         .environment(keyring)
         .environment(appSignIn)
+        .environment(launchRoute)
         .duovaTheme(style: display.colorStyle)
         .bookPostureAware()
         .preferredColorScheme(display.appearance.colorScheme)
         .animation(.easeInOut(duration: reducesMotion ? 0.1 : 0.3), value: auth.phase)
+        .animation(.easeInOut(duration: reducesMotion ? 0.1 : 0.3), value: immersiveService)
         .onChange(of: auth.account?.id, initial: true) { _, id in
             session.activate(accountID: id)
             servicePreferences.activate(accountID: id)
+            launchRoute.activate(accountID: id)
+            if immersive?.accountID != id { immersive = nil }
+        }
+        .onChange(of: immersiveService, initial: true) { _, service in
+            syncImmersive(service)
         }
         .task(id: auth.account?.id) {
             await auth.verifyAppleCredential()
@@ -77,7 +98,10 @@ struct RootView: View {
             }
             await auth.syncPrivateName()
             await preferenceSync.start(accountID: accountID, current: preferenceSnapshot, apply: apply)
-            appSignIn.start(accountID: accountID, priority: session.favorites)
+            // Inside a launched service nothing else signs in to anything.
+            if immersiveService == nil {
+                appSignIn.start(accountID: accountID, priority: session.favorites)
+            }
             await watchForNewDevices()
         }
         .task(id: keyring.state) {
@@ -93,11 +117,24 @@ struct RootView: View {
                 if keyring.state == .offline {
                     Task { await keyring.prepare(accountID: auth.account?.id) }
                 }
-            case .background: auth.sceneDidEnterBackground()
+            case .background:
+                auth.sceneDidEnterBackground()
+                immersive?.saveCheckpointNow()
             default: break
             }
             if newPhase != .active { session.recordInactive() }
         }
+    }
+
+    /// Creates the service's surfaces once when a launch is committed and keeps
+    /// them until the account changes. Nothing here ever goes the other way.
+    private func syncImmersive(_ service: ServiceID?) {
+        guard let service, let accountID = auth.account?.id else { return }
+        if let immersive, immersive.service == service, immersive.accountID == accountID { return }
+        guard let adapter = SocialAdapterRegistry.adapter(for: service) else { return }
+        appSignIn.stop()
+        immersive = ImmersiveCoordinator(
+            accountID: accountID, service: service, adapter: adapter, preferences: servicePreferences)
     }
 
     /// Everything that syncs with the account (App Lock settings stay on the device).
@@ -129,10 +166,20 @@ struct RootView: View {
         case .locked:
             LockView().transition(.opacity)
         case .active:
-            MainShell()
-                .transition(.opacity)
-                .pageSheet(isPresented: $showDeviceLink) { DeviceLinkView() }
-                .pageSheet(item: $approvingDevice) { DeviceApprovalView(device: $0) }
+            if immersiveService != nil {
+                // The service is the app now: no shell, no Duova sheets.
+                if let immersive {
+                    ImmersiveServiceHost(coordinator: immersive)
+                        .transition(.opacity)
+                } else {
+                    Color(.systemBackground).ignoresSafeArea()
+                }
+            } else {
+                MainShell()
+                    .transition(.opacity)
+                    .pageSheet(isPresented: $showDeviceLink) { DeviceLinkView() }
+                    .pageSheet(item: $approvingDevice) { DeviceApprovalView(device: $0) }
+            }
         }
     }
 
@@ -141,7 +188,7 @@ struct RootView: View {
         while !Task.isCancelled {
             if scenePhase == .active {
                 await keyring.refreshDevices()
-                if approvingDevice == nil, auth.phase == .active,
+                if approvingDevice == nil, auth.phase == .active, immersiveService == nil,
                    let request = keyring.pendingDevices.first(where: { !shownRequests.contains($0.id) }) {
                     shownRequests.insert(request.id)
                     approvingDevice = request
