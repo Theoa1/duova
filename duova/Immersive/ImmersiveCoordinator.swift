@@ -49,6 +49,16 @@ final class ImmersiveCoordinator {
     @ObservationIgnored private let dataStore: WKWebsiteDataStore
     @ObservationIgnored private let checkpoints: ImmersiveCheckpointStore
     @ObservationIgnored private var pendingRestore: ImmersiveCheckpoint?
+    @ObservationIgnored private var pendingCompanionRestore: ImmersiveCheckpoint?
+    @ObservationIgnored private var restoreTasks: [ObjectIdentifier: Task<Void, Never>] = [:]
+    @ObservationIgnored private var captureGeneration = 0
+    @ObservationIgnored private var restoreTokens: [ObjectIdentifier: UUID] = [:]
+    @ObservationIgnored private var loginInterrupted: Set<ObjectIdentifier> = []
+    @ObservationIgnored private var lastCheckpoint: ImmersiveCheckpoint?
+    @ObservationIgnored private let preloader = SocialPreloadCoordinator()
+    @ObservationIgnored private var networkAllowsPreload = false
+    @ObservationIgnored private var sceneActive = false
+    @ObservationIgnored private var companionPresentationTask: Task<Void, Never>?
     @ObservationIgnored private var checkpointTask: Task<Void, Never>?
     @ObservationIgnored private var scrollObservers: [NSKeyValueObservation] = []
     @ObservationIgnored private var pathMonitor: NWPathMonitor?
@@ -78,6 +88,9 @@ final class ImmersiveCoordinator {
     deinit {
         checkpointTask?.cancel()
         pathMonitor?.cancel()
+        companionPresentationTask?.cancel()
+        for task in restoreTasks.values { task.cancel() }
+        for observer in lifecycleObservers { NotificationCenter.default.removeObserver(observer) }
     }
 
     // MARK: Launch and restore
@@ -90,10 +103,12 @@ final class ImmersiveCoordinator {
 
         let checkpoint = checkpoints.load(accountID: accountID, service: service)
         var target = adapter.homeURL
-        if opening == .resumeLast, let checkpoint, checkpoint.adapterVersion == adapter.version,
+        if opening == .resumeLast, let checkpoint, checkpoint.adapterVersion <= adapter.version,
            let url = adapter.url(forCheckpointRoute: checkpoint.primaryRoute) {
             target = url
             pendingRestore = checkpoint
+            lastCheckpoint = checkpoint
+            pendingCompanionRestore = checkpoint
             if let saved = checkpoint.splitRatio { splitRatio = saved }
             if let route = checkpoint.companionRoute, let kind = checkpoint.companionKind,
                let companionURL = adapter.url(forCheckpointRoute: route) {
@@ -113,7 +128,9 @@ final class ImmersiveCoordinator {
     /// The site asked (through its own links) for context in the second pane.
     /// The companion surface is created on first use and then reused.
     func openInCompanion(_ url: URL, kind: CompanionKind, remember: Bool = true) {
-        guard adapter.allowsMainFrame(url) else { return }
+        guard adapter.isSiteHost(url), adapter.acceptsCompanion(kind, url: url) else { return }
+        preloader.cancel()
+        if remember { pendingCompanionRestore = nil }
         let pane: SocialPane
         if let companion {
             pane = companion
@@ -124,8 +141,59 @@ final class ImmersiveCoordinator {
             companion = pane
         }
         companionKind = kind
-        pane.load(url)
+        companionPresentationTask?.cancel()
+        if pane.lastError != nil || pane.webView.url?.path != url.path || pane.webView.url?.host() != url.host() {
+            pane.load(url)
+        }
+        if !pane.webView.isLoading && remember { presentCompanionContext(pane) }
         if remember { scheduleCheckpoint() }
+    }
+
+    private func presentCompanionContext(_ pane: SocialPane) {
+        guard let companionKind, pane.webView.window != nil, !pane.webView.isHidden else { return }
+        companionPresentationTask?.cancel()
+        let generation = pane.navigationGeneration
+        companionPresentationTask = Task { [weak self, weak pane] in
+            guard let self, let pane else { return }
+            let interaction = await pane.evaluate("window.__duovaState ? window.__duovaState.interaction() : 0") as? Int
+            for _ in 0..<8 {
+                guard !Task.isCancelled, pane.navigationGeneration == generation,
+                      self.adapter.isSiteHost(pane.webView.url) else { return }
+                let current = await pane.evaluate("window.__duovaState ? window.__duovaState.interaction() : 0") as? Int
+                guard current == interaction else { return }
+                if await pane.evaluate(self.adapter.companionPresentationScript(for: companionKind)) as? Bool == true { return }
+                try? await Task.sleep(for: .milliseconds(400))
+            }
+            // Unknown markup remains the unmodified real post, including its own controls.
+        }
+    }
+
+    /// Native navigation changes only the primary page.
+    func navigatePrimary(_ path: String) {
+        guard let url = adapter.url(forCheckpointRoute: path) else { return }
+        pendingRestore = nil
+        restoreTasks[ObjectIdentifier(primary)]?.cancel()
+        primary.load(url)
+    }
+
+    func selectCompanion(_ kind: CompanionKind) {
+        switch kind {
+        case .messages, .explore:
+            let path = kind == .messages ? "/direct/inbox/" : "/explore/"
+            if let url = adapter.url(forCheckpointRoute: path) { openInCompanion(url, kind: kind) }
+        case .comments, .post:
+            Task { [weak self] in
+                guard let self else { return }
+                let generation = primary.navigationGeneration
+                let anchor = await primary.evaluate(adapter.anchorScript) as? String
+                guard generation == primary.navigationGeneration, companionAvailable else { return }
+                let url = anchor.flatMap { adapter.url(forCheckpointRoute: $0) } ?? primary.webView.url
+                if let url, adapter.acceptsCompanion(.comments, url: url) {
+                    openInCompanion(url, kind: .comments)
+                }
+            }
+        default: break
+        }
     }
 
     func updateSplitRatio(_ ratio: PanelRatio) {
@@ -152,60 +220,128 @@ final class ImmersiveCoordinator {
         }
     }
 
-    private func captureCheckpoint() async {
-        guard let primaryURL = primary.webView.url, let route = adapter.checkpointRoute(for: primaryURL) else { return }
-        var companionRoute: String?
-        if let companion, let url = companion.webView.url {
-            companionRoute = adapter.checkpointRoute(for: url)
+    private func captureState(of pane: SocialPane) async -> SocialPageState? {
+        guard let url = pane.webView.url, adapter.isSiteHost(url),
+              let route = adapter.checkpointRoute(for: url), route == url.path,
+              let value = await pane.evaluate("window.__duovaState ? window.__duovaState.capture() : null"),
+              JSONSerialization.isValidJSONObject(value),
+              let data = try? JSONSerialization.data(withJSONObject: value), data.count < 16_384,
+              var state = try? JSONDecoder().decode(SocialPageState.self, from: data),
+              state.route == route, state.x.isFinite, state.y.isFinite else { return nil }
+        if let anchor = state.anchor,
+           adapter.url(forCheckpointRoute: anchor) == nil { state.anchor = nil; state.anchorOffset = nil }
+        state.media = state.media.filter {
+            $0.seconds.isFinite && $0.seconds >= 0 && $0.seconds <= 86_400 &&
+            ($0.anchor.map { adapter.url(forCheckpointRoute: $0) != nil } ?? true)
         }
-        let anchor = await currentAnchor()
-        let checkpoint = ImmersiveCheckpoint(
+        return state
+    }
+
+    func captureCheckpoint() async {
+        // Never overwrite a good checkpoint with a not-yet-restored page at offset zero.
+        guard pendingRestore == nil, restoreTasks.isEmpty,
+              let primaryURL = primary.webView.url, let route = adapter.checkpointRoute(for: primaryURL),
+              !primary.webView.isLoading else { return }
+        captureGeneration += 1
+        let generation = captureGeneration
+        let primaryNavigation = primary.navigationGeneration
+        let companionNavigation = companion?.navigationGeneration
+        let primaryState = await captureState(of: primary)
+        let companionState: SocialPageState?
+        if let companion { companionState = await captureState(of: companion) } else { companionState = nil }
+        guard generation == captureGeneration, primaryNavigation == primary.navigationGeneration,
+              companionNavigation == companion?.navigationGeneration,
+              primary.webView.url == primaryURL else { return }
+        let companionRoute = companion?.webView.url.flatMap { adapter.checkpointRoute(for: $0) }
+        var checkpoint = ImmersiveCheckpoint(
             adapterVersion: adapter.version, accountID: accountID, service: service, primaryRoute: route,
             companionRoute: companionRoute, companionKind: companionRoute == nil ? nil : companionKind,
             splitRatio: splitRatio, primaryScrollY: primary.webView.scrollView.contentOffset.y,
-            companionScrollY: companion?.webView.scrollView.contentOffset.y ?? 0, anchor: anchor,
+            companionScrollY: companion?.webView.scrollView.contentOffset.y ?? 0, anchor: primaryState?.anchor,
             posture: currentPosture, capturedAt: .now)
+        checkpoint.primaryState = primaryState
+        checkpoint.companionState = companionState
+        if let pendingCompanionRestore {
+            checkpoint.companionRoute = pendingCompanionRestore.companionRoute
+            checkpoint.companionKind = pendingCompanionRestore.companionKind
+            checkpoint.companionScrollY = pendingCompanionRestore.companionScrollY
+            checkpoint.companionState = pendingCompanionRestore.companionState
+        }
+        lastCheckpoint = checkpoint
         checkpoints.save(checkpoint)
     }
 
-    private func currentAnchor() async -> String? {
-        guard adapter.isSiteHost(primary.webView.url), !adapter.anchorScript.isEmpty, adapter.anchorScript != "null"
-        else { return nil }
-        let result = await primary.evaluate(adapter.anchorScript)
-        guard let path = result as? String, let url = SocialRoutes.url(path: path, on: adapter.homeURL),
-              adapter.checkpointRoute(for: url) != nil
-        else { return nil }
-        return path
+    private func beginRestore(for pane: SocialPane) {
+        let id = ObjectIdentifier(pane)
+        guard restoreTasks[id] == nil, !pane.webView.isLoading,
+              pane.webView.window != nil, !pane.webView.isHidden,
+              pane.webView.bounds.width > 0, pane.webView.bounds.height > 0 else { return }
+        let checkpoint = pane === primary ? pendingRestore : pendingCompanionRestore
+        guard let checkpoint else { return }
+        let token = UUID()
+        restoreTokens[id] = token
+        restoreTasks[id] = Task { [weak self, weak pane] in
+            guard let self, let pane else { return }
+            await self.finishRestore(checkpoint, for: pane)
+            if self.restoreTokens[id] == token {
+                self.restoreTasks[id] = nil
+                self.restoreTokens[id] = nil
+            }
+        }
     }
 
-    /// Bounded, best-effort position restore after the page is actually ready,
-    /// only when the site landed on the route that was remembered.
-    private func finishRestoreIfNeeded(for pane: SocialPane, url: URL?) async {
-        guard let checkpoint = pendingRestore, pane === primary else { return }
-        pendingRestore = nil
-        guard let url, adapter.isSiteHost(url) else {
-            record(.unavailable)
+    private func finishRestore(_ checkpoint: ImmersiveCheckpoint, for pane: SocialPane) async {
+        let route = pane === primary ? checkpoint.primaryRoute : checkpoint.companionRoute
+        guard let route else { return }
+        let generation = pane.navigationGeneration
+        let id = ObjectIdentifier(pane)
+        guard let url = pane.webView.url, adapter.isSiteHost(url), url.path == route else {
+            if pane.webView.url.map(isLoginRoute) == true {
+                loginInterrupted.insert(id)
+                record(.siteRequiresLogin)
+            } else if loginInterrupted.remove(id) != nil,
+                      let target = adapter.url(forCheckpointRoute: route) {
+                // One safe navigation after the site's own login. Never replay inputs.
+                pane.load(target)
+            } else {
+                if pane === primary { pendingRestore = nil } else { pendingCompanionRestore = nil }
+                record(.partial)
+            }
             return
         }
-        guard adapter.checkpointRoute(for: url) == checkpoint.primaryRoute else {
-            // The site sent us elsewhere (its sign-in, or a redirect). Leave it be.
-            record(isLoginRoute(url) ? .siteRequiresLogin : .partial)
-            return
+        loginInterrupted.remove(id)
+        let state = (pane === primary ? checkpoint.primaryState : checkpoint.companionState) ??
+            SocialPageState(route: route, x: 0,
+                y: Double(pane === primary ? checkpoint.primaryScrollY : checkpoint.companionScrollY),
+                anchor: pane === primary ? checkpoint.anchor : nil, anchorOffset: 0, scrollers: [], media: [])
+        var restored = false
+        var interaction: Int?
+        for _ in 0..<12 {
+            guard !Task.isCancelled, generation == pane.navigationGeneration,
+                  pane.webView.url?.path == route, adapter.isSiteHost(pane.webView.url) else { return }
+            if interaction == nil {
+                interaction = await pane.evaluate("window.__duovaState ? window.__duovaState.interaction() : null") as? Int
+            }
+            if let interaction, let script = SocialPageScripts.restore(state, interaction: interaction),
+               let result = await pane.evaluate(script) as? [String: Any] {
+                if result["interrupted"] as? Bool == true { break }
+                if result["done"] as? Bool == true { restored = true; break }
+            }
+            try? await Task.sleep(for: .milliseconds(400))
         }
-        // Give the site a moment to lay out, then try the anchor, then the offset.
-        try? await Task.sleep(for: .milliseconds(600))
-        var anchored = false
-        if let anchor = checkpoint.anchor {
-            let result = await pane.evaluate(adapter.scrollToAnchorScript(anchor))
-            anchored = (result as? Bool) ?? false
-        }
-        if !anchored, checkpoint.primaryScrollY > 0 {
-            let scrollView = pane.webView.scrollView
-            let maxY = max(0, scrollView.contentSize.height - scrollView.bounds.height)
-            scrollView.setContentOffset(CGPoint(x: 0, y: min(checkpoint.primaryScrollY, maxY)), animated: false)
-            anchored = maxY > 0
-        }
-        record(anchored ? .restored : .partial)
+        guard !Task.isCancelled, generation == pane.navigationGeneration else { return }
+        if pane === primary { pendingRestore = nil } else { pendingCompanionRestore = nil }
+        record(restored ? .restored : .partial)
+    }
+
+    func paneDidBecomeVisible(_ pane: SocialPane) {
+        beginRestore(for: pane)
+    }
+
+    func setSceneActive(_ active: Bool) {
+        sceneActive = active
+        preloader.enabled = active && networkAllowsPreload
+        if !active { saveCheckpointNow() }
     }
 
     private func isLoginRoute(_ url: URL) -> Bool {
@@ -228,10 +364,13 @@ final class ImmersiveCoordinator {
 
     private func observeLifecycle() {
         let center = NotificationCenter.default
-        for name in [UIApplication.didEnterBackgroundNotification, UIApplication.willResignActiveNotification,
-                     UIApplication.willTerminateNotification] {
+        for name in [UIApplication.didReceiveMemoryWarningNotification, Notification.Name.NSProcessInfoPowerStateDidChange,
+                     ProcessInfo.thermalStateDidChangeNotification] {
             lifecycleObservers.append(center.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
-                Task { @MainActor [weak self] in self?.saveCheckpointNow() }
+                Task { @MainActor [weak self] in
+                    self?.preloader.cancel()
+                    self?.saveCheckpointNow()
+                }
             })
         }
     }
@@ -240,10 +379,13 @@ final class ImmersiveCoordinator {
         let monitor = NWPathMonitor()
         monitor.pathUpdateHandler = { [weak self] path in
             let online = path.status == .satisfied
+            let permitsPreload = online && !path.isConstrained && !path.isExpensive
             Task { @MainActor [weak self] in
                 guard let self else { return }
                 let wasOnline = self.isOnline
                 self.isOnline = online
+                self.networkAllowsPreload = permitsPreload
+                self.preloader.enabled = permitsPreload && self.sceneActive
                 if online, !wasOnline, self.phase == .offline {
                     self.retry()
                 } else if !online, self.phase == .loading {
@@ -259,7 +401,20 @@ final class ImmersiveCoordinator {
 // MARK: - Pane events
 
 extension ImmersiveCoordinator: SocialPaneDelegate {
+    func paneStateDidChange(_ pane: SocialPane) {
+        if pane === primary && pendingRestore != nil || pane !== primary && pendingCompanionRestore != nil {
+            if restoreTasks[ObjectIdentifier(pane)] == nil { beginRestore(for: pane) }
+        }
+        scheduleCheckpoint(after: .milliseconds(300))
+    }
+
+    func pane(_ pane: SocialPane, suggestsPrefetch url: URL) {
+        guard phase == .ready, pendingRestore == nil, restoreTasks.isEmpty else { return }
+        preloader.suggest(url, in: pane)
+    }
+
     func pane(_ pane: SocialPane, didCommit url: URL?) {
+        preloader.cancel()
         if pane === primary {
             phase = .ready
         }
@@ -269,13 +424,19 @@ extension ImmersiveCoordinator: SocialPaneDelegate {
         if pane === primary {
             phase = .ready
             pane.setCompanionAvailable(companionAvailable)
-            Task { await finishRestoreIfNeeded(for: pane, url: url) }
         }
+        if pane !== primary && pendingCompanionRestore == nil { presentCompanionContext(pane) }
+        beginRestore(for: pane)
         scheduleCheckpoint(after: .milliseconds(400))
     }
 
     func pane(_ pane: SocialPane, didFail error: Error) {
-        guard pane === primary, phase != .ready || primary.webView.url == nil else { return }
+        guard pane === primary else {
+            // Keep the anchored feed usable. A failed context can be retried by
+            // selecting its original website control again.
+            record(isOnline ? .unavailable : .offline)
+            return
+        }
         let nsError = error as NSError
         let offlineCodes = [NSURLErrorNotConnectedToInternet, NSURLErrorNetworkConnectionLost, NSURLErrorTimedOut,
                             NSURLErrorCannotFindHost, NSURLErrorCannotConnectToHost, NSURLErrorDNSLookupFailed]
@@ -289,12 +450,16 @@ extension ImmersiveCoordinator: SocialPaneDelegate {
     }
 
     func paneProcessDidTerminate(_ pane: SocialPane) {
-        // Same instance, same route; the checkpoint already remembers the position.
+        preloader.cancel()
+        restoreTasks[ObjectIdentifier(pane)]?.cancel()
+        let checkpoint = lastCheckpoint ?? checkpoints.load(accountID: accountID, service: service)
         if pane === primary {
             phase = .loading
-            pendingRestore = checkpoints.load(accountID: accountID, service: service)
-        }
-        pane.retry()
+            pendingRestore = checkpoint
+        } else { pendingCompanionRestore = checkpoint }
+        let route = pane === primary ? checkpoint?.primaryRoute : checkpoint?.companionRoute
+        if let route, let url = adapter.url(forCheckpointRoute: route) { pane.load(url) }
+        else { pane.retry() }
     }
 
     func pane(_ pane: SocialPane, requestsCompanion url: URL, kind: CompanionKind) {

@@ -3,7 +3,7 @@ import Foundation
 /// What the companion pane is showing: a context the person opened from the
 /// primary surface through the site's own links.
 enum CompanionKind: String, Codable, CaseIterable {
-    case post, profile, explore, messages, other
+    case post, comments, profile, explore, messages, other
 }
 
 /// Everything the engine needs to know about one social website, so the same
@@ -23,6 +23,11 @@ protocol SocialAdapter {
     var authHosts: Set<String> { get }
     /// Narrowest pane that should still ask for the desktop site.
     var desktopMinimumWidth: CGFloat { get }
+    /// A responsive phone source remains consistent when folding a live page.
+    var prefersMobileContent: Bool { get }
+    func permitsPrefetch(_ url: URL) -> Bool
+    func acceptsCompanion(_ kind: CompanionKind, url: URL) -> Bool
+    func companionPresentationScript(for kind: CompanionKind) -> String
 
     /// A route safe to remember: the path only, with nothing that identifies a
     /// session, a code or a search. Nil when the page shouldn't be remembered.
@@ -51,6 +56,12 @@ protocol SocialAdapter {
 
 extension SocialAdapter {
     var desktopMinimumWidth: CGFloat { 700 }
+    var prefersMobileContent: Bool { false }
+    func permitsPrefetch(_ url: URL) -> Bool { false }
+    func companionPresentationScript(for kind: CompanionKind) -> String { "true" }
+    func acceptsCompanion(_ kind: CompanionKind, url: URL) -> Bool {
+        companionKind(for: url, from: nil) == kind
+    }
     var primaryScript: String { "" }
     var styleSheet: String? { nil }
     var anchorScript: String { "null" }
@@ -64,7 +75,9 @@ extension SocialAdapter {
     }
 
     func isSiteHost(_ url: URL?) -> Bool {
-        guard let host = url?.host()?.lowercased() else { return false }
+        guard url?.scheme?.lowercased() == "https", url?.user == nil, url?.password == nil,
+              url?.port == nil || url?.port == 443,
+              let host = url?.host()?.lowercased() else { return false }
         return siteHosts.contains(host)
     }
 }
@@ -105,7 +118,9 @@ enum SocialRoutes {
     }
 
     static func url(path: String, on home: URL) -> URL? {
-        guard path.hasPrefix("/"), !path.contains("..") else { return nil }
+        guard path.hasPrefix("/"), !path.hasPrefix("//"), path.count <= 512,
+              !path.contains(".."), !path.contains("\\\\"),
+              !path.unicodeScalars.contains(where: { CharacterSet.controlCharacters.contains($0) }) else { return nil }
         var components = URLComponents()
         components.scheme = "https"
         components.host = home.host()

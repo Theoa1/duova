@@ -99,7 +99,7 @@ struct RootView: View {
             await auth.syncPrivateName()
             await preferenceSync.start(accountID: accountID, current: preferenceSnapshot, apply: apply)
             // Inside a launched service nothing else signs in to anything.
-            if immersiveService == nil {
+            if launchRoute.committedService == nil {
                 appSignIn.start(accountID: accountID, priority: session.favorites)
             }
             await watchForNewDevices()
@@ -169,13 +169,13 @@ struct RootView: View {
             if immersiveService != nil {
                 // The service is the app now: no shell, no Duova sheets.
                 if let immersive {
-                    ImmersiveServiceHost(coordinator: immersive)
+                    ImmersiveServiceHost(coordinator: immersive, onSuspend: { launchRoute.park() })
                         .transition(.opacity)
                 } else {
                     Color(.systemBackground).ignoresSafeArea()
                 }
             } else {
-                MainShell()
+                MainShell(startInSplitter: launchRoute.isParked)
                     .transition(.opacity)
                     .pageSheet(isPresented: $showDeviceLink) { DeviceLinkView() }
                     .pageSheet(item: $approvingDevice) { DeviceApprovalView(device: $0) }

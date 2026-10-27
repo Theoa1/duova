@@ -4,7 +4,7 @@ import Foundation
 /// back there. Only routes and positions: never tokens, query strings,
 /// messages, page content or anything the site stores about them.
 struct ImmersiveCheckpoint: Codable, Equatable {
-    static let currentSchema = 1
+    static let currentSchema = 2
 
     var schemaVersion = ImmersiveCheckpoint.currentSchema
     var adapterVersion: Int
@@ -22,6 +22,8 @@ struct ImmersiveCheckpoint: Codable, Equatable {
     var anchor: String?
     var posture: SocialPosture
     var capturedAt: Date
+    var primaryState: SocialPageState? = nil
+    var companionState: SocialPageState? = nil
 }
 
 /// Encrypted, account-scoped storage for checkpoints, one per service.
@@ -30,7 +32,7 @@ struct ImmersiveCheckpointStore {
 
     func load(accountID: UUID, service: ServiceID) -> ImmersiveCheckpoint? {
         guard let checkpoint = store.load(ImmersiveCheckpoint.self, name: Self.name(accountID, service)),
-              checkpoint.schemaVersion == ImmersiveCheckpoint.currentSchema,
+              (1...ImmersiveCheckpoint.currentSchema).contains(checkpoint.schemaVersion),
               checkpoint.accountID == accountID, checkpoint.service == service
         else { return nil }
         return checkpoint

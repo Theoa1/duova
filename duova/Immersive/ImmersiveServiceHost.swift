@@ -3,13 +3,14 @@ import SwiftUI
 /// The whole window while a service is launched. Shows the live service; while
 /// the first page is on its way it shows a quiet system-colored surface, and
 /// if the site or the connection fails it shows a plain retry in place. Never
-/// a way back to the library.
+/// a destructive reset when returning to Splitter.
 struct ImmersiveServiceHost: View {
     let coordinator: ImmersiveCoordinator
+    var onSuspend: () -> Bool = { false }
 
     var body: some View {
         ZStack {
-            ImmersiveHostRepresentable(coordinator: coordinator)
+            ImmersiveHostRepresentable(coordinator: coordinator, onSuspend: onSuspend)
                 .ignoresSafeArea()
 
             switch coordinator.phase {
@@ -29,6 +30,9 @@ struct ImmersiveServiceHost: View {
             }
         }
         .animation(.easeOut(duration: 0.25), value: coordinator.phase)
+        .accessibilityAction(named: "Return to Splitter") {
+            Task { await coordinator.captureCheckpoint(); _ = onSuspend() }
+        }
         .statusBarHidden(true)
         .persistentSystemOverlays(.hidden)
         .preferredColorScheme(nil)
@@ -37,15 +41,19 @@ struct ImmersiveServiceHost: View {
 
 private struct ImmersiveHostRepresentable: UIViewControllerRepresentable {
     let coordinator: ImmersiveCoordinator
+    var onSuspend: () -> Bool
 
     func makeUIViewController(context: Context) -> ImmersiveHostController {
-        ImmersiveHostController(coordinator: coordinator)
+        let controller = ImmersiveHostController(coordinator: coordinator)
+        controller.onSuspend = onSuspend
+        return controller
     }
 
     func updateUIViewController(_ controller: ImmersiveHostController, context: Context) {
         // Reading these here re-runs the update when the companion changes.
         _ = coordinator.companionWanted
         _ = coordinator.splitRatio
+        controller.onSuspend = onSuspend
         controller.companionDidChange()
     }
 }

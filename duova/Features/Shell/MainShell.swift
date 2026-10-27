@@ -18,6 +18,12 @@ struct MainShell: View {
     @Environment(\.duovaTheme) private var theme
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
+    @State private var showsSplitter: Bool
+
+    init(startInSplitter: Bool = false) {
+        _showsSplitter = State(initialValue: startInSplitter)
+    }
+
     @State private var query = ""
     @State private var searching = false
     @State private var showsProfile = false
@@ -27,8 +33,18 @@ struct MainShell: View {
     private var dragOffset: CGFloat = 0
 
     var body: some View {
-        LibraryView(query: $query) {
-            titleRow
+        Group {
+            if showsSplitter {
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 24) {
+                        titleRow
+                        SplitterView()
+                    }
+                    .padding(20)
+                }
+            } else {
+                LibraryView(query: $query) { titleRow }
+            }
         }
         .overlay { profilePanel }
         .onPreferenceChange(ProfileAtRootKey.self) { profileAtRoot = $0 }
@@ -38,12 +54,12 @@ struct MainShell: View {
 
     /// "Apps" (or the search field while searching) with the navigation beside it.
     private var titleRow: some View {
-        HStack(spacing: 16) {
+        HStack(spacing: 8) {
             if searching {
                 searchField
                     .transition(.opacity.combined(with: .scale(scale: 0.96, anchor: .trailing)))
             } else {
-                Text("Apps")
+                Text(showsSplitter ? "Splitter" : "Apps")
                     .font(.largeTitle.bold())
                     .foregroundStyle(theme.textPrimary)
                     .accessibilityAddTraits(.isHeader)
@@ -57,9 +73,15 @@ struct MainShell: View {
 
     /// Three separate glass buttons.
     private var navigation: some View {
-        HStack(spacing: 12) {
-            navButton("square.grid.2x2.fill", label: "Apps", isActive: !searching && !showsProfile) {
+        HStack(spacing: 6) {
+            navButton("square.grid.2x2.fill", label: "Apps", isActive: !showsSplitter && !searching && !showsProfile) {
                 endSearch()
+                showsSplitter = false
+                setProfile(shown: false)
+            }
+            navButton("rectangle.split.2x1", label: "Splitter", isActive: showsSplitter && !showsProfile) {
+                endSearch()
+                showsSplitter = true
                 setProfile(shown: false)
             }
             navButton("person.crop.circle.fill", label: "Profile", isActive: showsProfile) {
@@ -129,6 +151,7 @@ struct MainShell: View {
     }
 
     private func beginSearch() {
+        showsSplitter = false
         setProfile(shown: false)
         withAnimation(reduceMotion ? nil : .spring(response: 0.35, dampingFraction: 0.9)) {
             searching = true

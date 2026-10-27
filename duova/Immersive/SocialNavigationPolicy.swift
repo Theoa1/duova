@@ -9,6 +9,8 @@ protocol SocialPaneDelegate: AnyObject {
     func pane(_ pane: SocialPane, didFail error: Error)
     func paneProcessDidTerminate(_ pane: SocialPane)
     /// The site asked to open a route the adapter classifies as companion content.
+    func paneStateDidChange(_ pane: SocialPane)
+    func pane(_ pane: SocialPane, suggestsPrefetch url: URL)
     func pane(_ pane: SocialPane, requestsCompanion url: URL, kind: CompanionKind)
 }
 
@@ -24,7 +26,26 @@ final class SocialPane: NSObject {
     let webView: WKWebView
     weak var delegate: SocialPaneDelegate?
     /// Pane width the content mode is chosen for; set by the compositor.
-    var layoutWidth: CGFloat = 0
+    var layoutWidth: CGFloat = 0 {
+        didSet { if layoutWidth != oldValue { updatePresentation() } }
+    }
+    private(set) var navigationGeneration = 0
+    private var companionEnabled = false
+    private var contentVisible = true
+
+    func setContentVisible(_ visible: Bool) {
+        guard contentVisible != visible else { return }
+        contentVisible = visible
+        webView.setAllMediaPlaybackSuspended(!visible, completionHandler: nil)
+    }
+
+    func updatePresentation() {
+        guard adapter.isSiteHost(webView.url) else { return }
+        let roleName = role == .primary ? "primary" : "companion"
+        // Idempotent writes avoid feeding mutations back into the site's renderer.
+        let script = "if (document.documentElement && document.documentElement.dataset.duovaPane !== '\(roleName)') document.documentElement.dataset.duovaPane = '\(roleName)'; true"
+        webView.evaluateJavaScript(script, in: nil, in: SocialWebViewFactory.contentWorld) { _ in }
+    }
 
     /// A site that returned an error for the main frame.
     private(set) var lastError: Error?
@@ -60,6 +81,7 @@ final class SocialPane: NSObject {
     /// forwarded (two panes) or left to the site (one pane).
     func setCompanionAvailable(_ available: Bool) {
         guard role == .primary else { return }
+        companionEnabled = available
         webView.evaluateJavaScript(
             "window.__duovaCompanion = \(available ? "true" : "false"); true",
             in: nil, in: SocialWebViewFactory.contentWorld) { _ in }
@@ -85,9 +107,15 @@ final class SocialPane: NSObject {
         case "open":
             guard let path = dictionary["path"] as? String, let kindName = dictionary["kind"] as? String,
                   let kind = CompanionKind(rawValue: kindName), let url = SocialRoutes.url(path: path, on: adapter.homeURL),
-                  adapter.companionKind(for: url, from: webView.url) == kind
+                  role == .primary, companionEnabled, adapter.acceptsCompanion(kind, url: url)
             else { return }
             delegate?.pane(self, requestsCompanion: url, kind: kind)
+        case "state":
+            delegate?.paneStateDidChange(self)
+        case "prefetch":
+            guard role == .primary, let path = dictionary["path"] as? String,
+                  let url = SocialRoutes.url(path: path, on: adapter.homeURL), adapter.permitsPrefetch(url) else { return }
+            delegate?.pane(self, suggestsPrefetch: url)
         default:
             break
         }
@@ -97,8 +125,11 @@ final class SocialPane: NSObject {
     private final class MessageBridge: NSObject, WKScriptMessageHandler {
         weak var pane: SocialPane?
         func userContentController(_ controller: WKUserContentController, didReceive message: WKScriptMessage) {
-            guard message.name == SocialWebViewFactory.messageHandlerName, message.frameInfo.isMainFrame else { return }
-            pane?.receive(message.body)
+            guard message.name == SocialWebViewFactory.messageHandlerName, message.frameInfo.isMainFrame,
+                  let pane, pane.adapter.isSiteHost(pane.webView.url),
+                  message.frameInfo.securityOrigin.protocol == "https",
+                  pane.adapter.siteHosts.contains(message.frameInfo.securityOrigin.host.lowercased()) else { return }
+            pane.receive(message.body)
         }
     }
 }
@@ -132,17 +163,27 @@ extension SocialPane: WKNavigationDelegate {
             return (.cancel, preferences)
         }
 
-        // Desktop site when the pane is wide enough; the mobile site in a narrow pane.
-        preferences.preferredContentMode = layoutWidth >= adapter.desktopMinimumWidth || layoutWidth == 0 ? .desktop : .mobile
+        // Every route (including login, messages and profiles) uses the phone
+        // presentation in narrow panes. Resize alone never reloads a live page.
+        preferences.preferredContentMode = adapter.prefersMobileContent || layoutWidth < adapter.desktopMinimumWidth
+            ? .mobile : .desktop
         preferences.allowsContentJavaScript = true
         return (.allow, preferences)
     }
 
+    func webView(_ webView: WKWebView, didStartProvisionalNavigation navigation: WKNavigation!) {
+        navigationGeneration += 1
+    }
+
     func webView(_ webView: WKWebView, didCommit navigation: WKNavigation!) {
+        updatePresentation()
+        setCompanionAvailable(companionEnabled)
         delegate?.pane(self, didCommit: webView.url)
     }
 
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
+        updatePresentation()
+        setCompanionAvailable(companionEnabled)
         delegate?.pane(self, didFinish: webView.url)
     }
 

@@ -3,9 +3,9 @@ import Foundation
 
 /// The seven layout states. They are design states: which one applies comes
 /// from the window's real geometry and the system hinge status, never from a
-/// guess about hardware. Tent can't be told apart from the others by any
-/// signal the system publishes, so it's reachable only through a developer
-/// override and otherwise falls back to the closed layouts.
+/// guess about hardware. The SDK exposes hinge status/angle, not a physical
+/// tent/standing classifier. That design state uses the compact production
+/// fallback and remains explicitly selectable in layout simulations.
 enum SocialPosture: String, Codable, CaseIterable {
     case closedPortrait, closedLandscape, openPortrait, openLandscape, book, tabletop, tent
 }
@@ -23,6 +23,9 @@ struct PostureInput: Equatable {
     var safeBottom: CGFloat = 0
     var safeTrailing: CGFloat = 0
     var hinge: HingeState = .unknown
+    /// Active system division region in this host's coordinates, margins included.
+    var divisionRegion: CGRect? = nil
+    var accessibilityLayout = false
     var layout: ExpandedLayout = .adaptive
     var ratio: PanelRatio = .sixtyForty
     /// The companion has something to show; without it the primary fills the window.
@@ -36,7 +39,7 @@ struct PostureLayout: Equatable {
     var primary: CGRect
     /// Nil when the companion is suspended (kept, not shown).
     var companion: CGRect?
-    /// Where the physical fold is assumed to be; nothing is laid out across it.
+    /// System division (or explicit simulated fold); panes never cross this frame.
     var foldGap: CGRect?
     /// Geometry allows a second pane right now, whether or not one is showing.
     var canShowCompanion: Bool
@@ -49,7 +52,7 @@ struct PostureLayout: Equatable {
 /// Two panes need room: about 760 pt of usable width in adaptive mode, and in
 /// every mode at least ~390 pt for the primary and ~320 pt for the companion
 /// after the gutter. Ratios are clamped to those minimums rather than clipping
-/// content. The same rules apply vertically for the tabletop split.
+/// content. Only the fully open landscape posture permits a companion.
 ///
 /// The keyboard doesn't change the frames: each web view insets its own
 /// content for it, so the pane that has focus stays where it is and scrolls
@@ -58,8 +61,8 @@ enum SocialPostureResolver {
     static let adaptiveTwoPaneMinimum: CGFloat = 760
     static let primaryMinimum: CGFloat = 390
     static let companionMinimum: CGFloat = 320
-    /// Hairline between panes on a flat display.
-    static let gutter: CGFloat = 1
+    /// Empty spacing between panes; the host does not draw a divider.
+    static let gutter: CGFloat = 8
     /// Clearance left around a partly open hinge.
     static let foldClearance: CGFloat = 24
 
@@ -68,7 +71,12 @@ enum SocialPostureResolver {
         let landscape = input.size.width >= input.size.height
         switch input.hinge {
         case .fullyOpen: return landscape ? .openLandscape : .openPortrait
-        case .partiallyOpen: return landscape ? .book : .tabletop
+        case .partiallyOpen:
+            if let division = input.divisionRegion {
+                return division.width >= division.height ? .tabletop : .book
+            }
+            // Without a region, use a responsive layout, never invent a fold.
+            return landscape ? .closedLandscape : .closedPortrait
         case .closed, .unknown: return landscape ? .closedLandscape : .closedPortrait
         }
     }
@@ -80,67 +88,61 @@ enum SocialPostureResolver {
             x: input.safeLeading, y: input.safeTop,
             width: max(0, input.size.width - input.safeLeading - input.safeTrailing),
             height: max(0, input.size.height - input.safeTop - input.safeBottom))
-        let folded = posture == .book || posture == .tabletop
-        let vertical = posture == .tabletop
-
-        // The fold runs through the middle of the longer side.
-        var foldGap: CGRect?
-        if folded {
-            foldGap = vertical
+        let simulatedFold = input.override == .book || input.override == .tabletop
+        let suppliedDivision = input.divisionRegion?.intersection(bounds)
+        var foldGap = suppliedDivision.flatMap { $0.isNull || $0.isEmpty ? nil : $0 }
+        if foldGap == nil, simulatedFold {
+            // Only deterministic preview/test inputs may manufacture a center fold.
+            foldGap = posture == .tabletop
                 ? CGRect(x: 0, y: bounds.midY - foldClearance / 2, width: bounds.width, height: foldClearance)
                 : CGRect(x: bounds.midX - foldClearance / 2, y: 0, width: foldClearance, height: bounds.height)
         }
+        let vertical = foldGap.map { $0.width >= $0.height } ?? (posture == .tabletop)
+        let minimumPrimary = primaryMinimum * (input.accessibilityLayout ? 1.25 : 1)
+        let minimumCompanion = companionMinimum * (input.accessibilityLayout ? 1.25 : 1)
 
-        let along = vertical ? usable.height : usable.width
-        let separator = folded ? foldClearance : gutter
-        let fits: Bool = {
-            switch input.layout {
-            case .single: return false
-            case .split: return along - separator >= primaryMinimum + companionMinimum
-            case .adaptive:
-                return along >= (vertical ? primaryMinimum + companionMinimum + separator : adaptiveTwoPaneMinimum)
-                    && along - separator >= primaryMinimum + companionMinimum
-            }
-        }()
-        // Tent and a closed phone never split; a closed display that is wide
-        // enough (iPad) may.
-        let canShowCompanion = fits && posture != .tent
-
-        guard canShowCompanion, input.companionWanted else {
-            // One surface. Keep it off a partly open fold's clearance only
-            // when the fold is vertical in a book; across a tabletop fold a
-            // single surface is still usable, so it fills the window.
+        if let gap = foldGap {
+            // A physical division fixes the pane boundary. Never clamp a ratio
+            // across it, even when safe areas on the two sides are asymmetric.
+            let first = vertical
+                ? CGRect(x: 0, y: 0, width: bounds.width, height: gap.minY)
+                : CGRect(x: 0, y: 0, width: gap.minX, height: bounds.height)
+            let second = vertical
+                ? CGRect(x: 0, y: gap.maxY, width: bounds.width, height: max(0, bounds.maxY - gap.maxY))
+                : CGRect(x: gap.maxX, y: 0, width: max(0, bounds.maxX - gap.maxX), height: bounds.height)
+            let firstUsable = first.intersection(usable)
+            let secondUsable = second.intersection(usable)
+            let firstLength = firstUsable.isNull ? 0 : (vertical ? firstUsable.height : firstUsable.width)
+            let secondLength = secondUsable.isNull ? 0 : (vertical ? secondUsable.height : secondUsable.width)
+            let fits = input.layout != .single && posture == .openLandscape
+                && firstLength >= minimumPrimary && secondLength >= minimumCompanion
+                && (input.layout != .adaptive || vertical || usable.width >= adaptiveTwoPaneMinimum)
+            let primaryFrame = fits && input.companionWanted ? first
+                : (firstLength >= secondLength ? first : second)
             return PostureLayout(
-                posture: posture, primary: bounds, companion: nil, foldGap: foldGap,
-                canShowCompanion: canShowCompanion, isVerticalSplit: vertical)
+                posture: posture, primary: primaryFrame,
+                companion: fits && input.companionWanted ? second : nil, foldGap: gap,
+                canShowCompanion: fits, isVerticalSplit: vertical)
         }
 
-        let available = along - separator
-        var primaryLength: CGFloat
-        if folded {
-            // Pages are the two halves; the fold decides the split.
-            primaryLength = (along - separator) / 2
-        } else {
-            primaryLength = (available * input.ratio.fraction).rounded()
-        }
-        primaryLength = min(max(primaryLength, primaryMinimum), available - companionMinimum)
-
-        if vertical {
-            // Primary on top, companion below (the half nearer the keyboard).
-            let primary = CGRect(x: 0, y: 0, width: bounds.width, height: usable.minY + primaryLength)
-            let companionTop = primary.maxY + separator
-            let companion = CGRect(
-                x: 0, y: companionTop, width: bounds.width, height: max(0, bounds.height - companionTop))
+        let along = usable.width
+        let fits = input.layout != .single && posture == .openLandscape
+            && along - gutter >= minimumPrimary + minimumCompanion
+            && (input.layout != .adaptive || along >= adaptiveTwoPaneMinimum)
+        guard fits, input.companionWanted else {
             return PostureLayout(
-                posture: posture, primary: primary, companion: companion, foldGap: foldGap,
-                canShowCompanion: true, isVerticalSplit: true)
+                posture: posture, primary: bounds, companion: nil, foldGap: nil,
+                canShowCompanion: fits, isVerticalSplit: false)
         }
-        // Primary on the leading side, companion on the trailing side.
+        let available = along - gutter
+        let primaryLength = min(
+            max((available * input.ratio.fraction).rounded(), minimumPrimary),
+            available - minimumCompanion)
         let primary = CGRect(x: 0, y: 0, width: usable.minX + primaryLength, height: bounds.height)
-        let companionLeft = primary.maxX + separator
+        let companionLeft = primary.maxX + gutter
         let companion = CGRect(x: companionLeft, y: 0, width: max(0, bounds.width - companionLeft), height: bounds.height)
         return PostureLayout(
-            posture: posture, primary: primary, companion: companion, foldGap: foldGap,
+            posture: posture, primary: primary, companion: companion, foldGap: nil,
             canShowCompanion: true, isVerticalSplit: false)
     }
 }

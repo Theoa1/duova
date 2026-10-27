@@ -4,29 +4,26 @@ import Observation
 /// Where the app is: the Duova library (before any service was launched) or a
 /// launched service, which takes over the whole app.
 enum DuovaRoute: Equatable {
+    case splitter
     case initialLibrary
     case immersive(ServiceID)
 }
 
-/// The one durable fact behind the route: which service the signed-in account
-/// launched on this device, if any.
-///
-/// Launching a service is a commitment. It's written (encrypted, per account)
-/// *before* the service appears, so a crash a moment later still reopens the
-/// service rather than the library. Nothing in the running app clears it:
-/// there is no route from a launched service back to the library in this
-/// phase. Only deleting the account, or a developer reset in a Debug build,
-/// removes it.
+/// Encrypted, account-scoped active or parked workspace destination.
+/// Older records reopen their service; parking explicitly returns to Splitter.
 @Observable
 final class DuovaLaunchRouteStore {
     private struct Commitment: Codable {
         var schemaVersion = 1
         var serviceSlug: String
         var committedAt: Date
+        var parked: Bool? = nil
     }
 
     /// The committed service for the active account, or nil before any launch.
     private(set) var committedService: ServiceID?
+    private(set) var isParked = false
+    private(set) var savedAt: Date?
 
     @ObservationIgnored private let store: SecureStore
     @ObservationIgnored private var accountID: UUID?
@@ -50,14 +47,18 @@ final class DuovaLaunchRouteStore {
               SocialAdapterRegistry.adapter(for: service) != nil
         else {
             committedService = nil
+            isParked = false
+            savedAt = nil
             return
         }
         committedService = service
+        isParked = saved.parked ?? false
+        savedAt = saved.committedAt
     }
 
     func route(for accountID: UUID?) -> DuovaRoute {
         guard accountID != nil, accountID == self.accountID, let committedService else { return .initialLibrary }
-        return .immersive(committedService)
+        return isParked ? .splitter : .immersive(committedService)
     }
 
     /// Commits to `service`. Returns false (and routes nowhere) if the
@@ -72,6 +73,22 @@ final class DuovaLaunchRouteStore {
             return false
         }
         committedService = service
+        isParked = false
+        savedAt = .now
+        return true
+    }
+
+    /// Park the workspace without clearing its isolated cookies or checkpoint.
+    @discardableResult
+    func park() -> Bool {
+        guard let accountID, let committedService else { return false }
+        let date = Date.now
+        do {
+            try store.save(Commitment(serviceSlug: committedService.rawValue, committedAt: date, parked: true),
+                           name: Self.name(accountID))
+        } catch { return false }
+        savedAt = date
+        isParked = true
         return true
     }
 
@@ -82,6 +99,8 @@ final class DuovaLaunchRouteStore {
         guard let accountID else { return }
         store.remove(name: Self.name(accountID))
         committedService = nil
+        isParked = false
+        savedAt = nil
     }
     #endif
 
