@@ -145,6 +145,15 @@ final class ServicePreferences {
         })
     }
 
+    /// Replaces everything at once (used when the account's synced copy arrives).
+    func replaceAll(defaults newDefaults: ServiceDefaults, overrides newOverrides: [ServiceID: ServiceOverrides]) {
+        isLoading = true
+        defaults = newDefaults
+        overrides = newOverrides.filter { !$0.value.isEmpty }
+        isLoading = false
+        save()
+    }
+
     func overrides(for id: ServiceID) -> ServiceOverrides {
         overrides[id] ?? ServiceOverrides()
     }

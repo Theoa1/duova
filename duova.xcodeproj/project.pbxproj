@@ -6,8 +6,25 @@
 	objectVersion = 110;
 	objects = {
 
+/* Begin PBXBuildFile section */
+		A1B2C3D4E5F600000000A002 /* Supabase in Frameworks */ = {isa = PBXBuildFile; productRef = A1B2C3D4E5F600000000A001 /* Supabase */; };
+/* End PBXBuildFile section */
+
+/* Begin PBXContainerItemProxy section */
+		000000000000000250000000 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 000000000000000000000000 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = 000000000000000100000000;
+			remoteInfo = duova;
+		};
+/* End PBXContainerItemProxy section */
+
 /* Begin PBXFileReference section */
 		000000000000000000000120 /* duova.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = duova.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		000000000000000000000220 /* duovaTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = duovaTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+		A1B2C3D4E5F600000000A003 /* DuovaDev.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; path = DuovaDev.xcconfig; sourceTree = "<group>"; };
+		A1B2C3D4E5F600000000A004 /* Duova-Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = "Duova-Info.plist"; sourceTree = "<group>"; };
 		E48E53FE308FA15C00129DE9 /* DUOVA_CONVERSATION.md */ = {isa = PBXFileReference; lastKnownFileType = net.daringfireball.markdown; path = DUOVA_CONVERSATION.md; sourceTree = "<group>"; };
 		E48E5400308FA40200129DE9 /* DUOVA_PROJECT_BLUEPRINT.md */ = {isa = PBXFileReference; lastKnownFileType = net.daringfireball.markdown; path = DUOVA_PROJECT_BLUEPRINT.md; sourceTree = "<group>"; };
 /* End PBXFileReference section */
@@ -18,10 +35,21 @@
 			path = duova;
 			sourceTree = "<group>";
 		};
+		000000000000000000000011 /* duovaTests */ = {
+			isa = PBXFileSystemSynchronizedRootGroup;
+			path = duovaTests;
+			sourceTree = "<group>";
+		};
 /* End PBXFileSystemSynchronizedRootGroup section */
 
 /* Begin PBXFrameworksBuildPhase section */
 		000000000000000130000000 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			files = (
+				A1B2C3D4E5F600000000A002 /* Supabase in Frameworks */,
+			);
+		};
+		000000000000000230000000 /* Frameworks */ = {
 			isa = PBXFrameworksBuildPhase;
 			files = (
 			);
@@ -33,8 +61,11 @@
 			isa = PBXGroup;
 			children = (
 				000000000000000000000010 /* duova */,
+				000000000000000000000011 /* duovaTests */,
 				E48E53FE308FA15C00129DE9 /* DUOVA_CONVERSATION.md */,
 				E48E5400308FA40200129DE9 /* DUOVA_PROJECT_BLUEPRINT.md */,
+				A1B2C3D4E5F600000000A003 /* DuovaDev.xcconfig */,
+				A1B2C3D4E5F600000000A004 /* Duova-Info.plist */,
 				000000000000000000000020 /* Products */,
 			);
 			sourceTree = "<group>";
@@ -43,6 +74,7 @@
 			isa = PBXGroup;
 			children = (
 				000000000000000000000120 /* duova.app */,
+				000000000000000000000220 /* duovaTests.xctest */,
 			);
 			name = Products;
 			sourceTree = "<group>";
@@ -64,9 +96,33 @@
 				000000000000000000000010 /* duova */,
 			);
 			name = duova;
+			packageProductDependencies = (
+				A1B2C3D4E5F600000000A001 /* Supabase */,
+			);
 			productName = MyApp;
 			productReference = 000000000000000000000120 /* duova.app */;
 			productType = "com.apple.product-type.application";
+		};
+		000000000000000200000000 /* duovaTests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = 000000000000000210000000 /* Build configuration list for PBXNativeTarget "duovaTests" */;
+			buildPhases = (
+				000000000000000220000000 /* Sources */,
+				000000000000000230000000 /* Frameworks */,
+				000000000000000240000000 /* Resources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				000000000000000260000000 /* PBXTargetDependency */,
+			);
+			fileSystemSynchronizedGroups = (
+				000000000000000000000011 /* duovaTests */,
+			);
+			name = duovaTests;
+			productName = duovaTests;
+			productReference = 000000000000000000000220 /* duovaTests.xctest */;
+			productType = "com.apple.product-type.bundle.unit-test";
 		};
 /* End PBXNativeTarget section */
 
@@ -81,6 +137,10 @@
 					000000000000000100000000 = {
 						CreatedOnToolsVersion = 26.3;
 					};
+					000000000000000200000000 = {
+						CreatedOnToolsVersion = 27.1;
+						TestTargetID = 000000000000000100000000;
+					};
 				};
 			};
 			buildConfigurationList = 000000000000000010000000 /* Build configuration list for PBXProject "duova" */;
@@ -92,18 +152,27 @@
 			);
 			mainGroup = 000000000000000000000001;
 			minimizedProjectReferenceProxies = 1;
+			packageReferences = (
+				E48E5537308FEAF600129DE9 /* XCRemoteSwiftPackageReference "supabase-swift" */,
+			);
 			preferredProjectObjectVersion = 110;
 			productRefGroup = 000000000000000000000020 /* Products */;
 			projectDirPath = "";
 			projectRoot = "";
 			targets = (
 				000000000000000100000000 /* duova */,
+				000000000000000200000000 /* duovaTests */,
 			);
 		};
 /* End PBXProject section */
 
 /* Begin PBXResourcesBuildPhase section */
 		000000000000000140000000 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			files = (
+			);
+		};
+		000000000000000240000000 /* Resources */ = {
 			isa = PBXResourcesBuildPhase;
 			files = (
 			);
@@ -116,11 +185,25 @@
 			files = (
 			);
 		};
+		000000000000000220000000 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			files = (
+			);
+		};
 /* End PBXSourcesBuildPhase section */
+
+/* Begin PBXTargetDependency section */
+		000000000000000260000000 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = 000000000000000100000000 /* duova */;
+			targetProxy = 000000000000000250000000 /* PBXContainerItemProxy */;
+		};
+/* End PBXTargetDependency section */
 
 /* Begin XCBuildConfiguration section */
 		000000000000000011000000 /* Debug configuration for PBXProject "duova" */ = {
 			isa = XCBuildConfiguration;
+			baseConfigurationReference = A1B2C3D4E5F600000000A003 /* DuovaDev.xcconfig */;
 			buildSettings = {
 				ALWAYS_SEARCH_USER_PATHS = NO;
 				ASSETCATALOG_COMPILER_GENERATE_SWIFT_ASSET_SYMBOL_EXTENSIONS = YES;
@@ -192,6 +275,7 @@
 		};
 		000000000000000012000000 /* Release configuration for PBXProject "duova" */ = {
 			isa = XCBuildConfiguration;
+			baseConfigurationReference = A1B2C3D4E5F600000000A003 /* DuovaDev.xcconfig */;
 			buildSettings = {
 				ALWAYS_SEARCH_USER_PATHS = NO;
 				ASSETCATALOG_COMPILER_GENERATE_SWIFT_ASSET_SYMBOL_EXTENSIONS = YES;
@@ -255,6 +339,7 @@
 		};
 		000000000000000111000000 /* Debug configuration for PBXNativeTarget "duova" */ = {
 			isa = XCBuildConfiguration;
+			baseConfigurationReference = A1B2C3D4E5F600000000A003 /* DuovaDev.xcconfig */;
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGN_ENTITLEMENTS = duova.entitlements;
@@ -266,6 +351,7 @@
 				ENABLE_PREVIEWS = YES;
 				ENABLE_USER_SELECTED_FILES = readonly;
 				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = "Duova-Info.plist";
 				INFOPLIST_KEY_CFBundleDisplayName = Duova;
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.productivity";
 				INFOPLIST_KEY_NSFaceIDUsageDescription = "Duova uses Face ID to unlock the app when App Lock is on.";
@@ -304,6 +390,7 @@
 		};
 		000000000000000112000000 /* Release configuration for PBXNativeTarget "duova" */ = {
 			isa = XCBuildConfiguration;
+			baseConfigurationReference = A1B2C3D4E5F600000000A003 /* DuovaDev.xcconfig */;
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CODE_SIGN_ENTITLEMENTS = duova.entitlements;
@@ -314,6 +401,7 @@
 				ENABLE_PREVIEWS = YES;
 				ENABLE_USER_SELECTED_FILES = readonly;
 				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = "Duova-Info.plist";
 				INFOPLIST_KEY_CFBundleDisplayName = Duova;
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.productivity";
 				INFOPLIST_KEY_NSFaceIDUsageDescription = "Duova uses Face ID to unlock the app when App Lock is on.";
@@ -350,6 +438,54 @@
 			};
 			name = Release;
 		};
+		000000000000000211000000 /* Debug configuration for PBXNativeTarget "duovaTests" */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = 49WM6APT33;
+				GENERATE_INFOPLIST_FILE = YES;
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = "com.agyemangjabez-icloud.com.duovaTests";
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = iphoneos;
+				STRING_CATALOG_GENERATE_SYMBOLS = YES;
+				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
+				SWIFT_APPROACHABLE_CONCURRENCY = YES;
+				SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor;
+				SWIFT_EMIT_LOC_STRINGS = NO;
+				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/duova.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/duova";
+			};
+			name = Debug;
+		};
+		000000000000000212000000 /* Release configuration for PBXNativeTarget "duovaTests" */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = 49WM6APT33;
+				GENERATE_INFOPLIST_FILE = YES;
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = "com.agyemangjabez-icloud.com.duovaTests";
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = iphoneos;
+				STRING_CATALOG_GENERATE_SYMBOLS = YES;
+				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
+				SWIFT_APPROACHABLE_CONCURRENCY = YES;
+				SWIFT_DEFAULT_ACTOR_ISOLATION = MainActor;
+				SWIFT_EMIT_LOC_STRINGS = NO;
+				SWIFT_UPCOMING_FEATURE_MEMBER_IMPORT_VISIBILITY = YES;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/duova.app/$(BUNDLE_EXECUTABLE_FOLDER_PATH)/duova";
+			};
+			name = Release;
+		};
 /* End XCBuildConfiguration section */
 
 /* Begin XCConfigurationList section */
@@ -369,7 +505,36 @@
 			);
 			defaultConfigurationName = Release;
 		};
+		000000000000000210000000 /* Build configuration list for PBXNativeTarget "duovaTests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				000000000000000211000000 /* Debug configuration for PBXNativeTarget "duovaTests" */,
+				000000000000000212000000 /* Release configuration for PBXNativeTarget "duovaTests" */,
+			);
+			defaultConfigurationName = Release;
+		};
 /* End XCConfigurationList section */
+
+/* Begin XCRemoteSwiftPackageReference section */
+		E48E5537308FEAF600129DE9 /* XCRemoteSwiftPackageReference "supabase-swift" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/supabase/supabase-swift";
+			requirement = {
+				kind = upToNextMajorVersion;
+				minimumVersion = 2.5.1;
+			};
+			traits = (
+			);
+		};
+/* End XCRemoteSwiftPackageReference section */
+
+/* Begin XCSwiftPackageProductDependency section */
+		A1B2C3D4E5F600000000A001 /* Supabase */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = E48E5537308FEAF600129DE9 /* XCRemoteSwiftPackageReference "supabase-swift" */;
+			productName = Supabase;
+		};
+/* End XCSwiftPackageProductDependency section */
 	};
 	rootObject = 000000000000000000000000 /* Project object */;
 }

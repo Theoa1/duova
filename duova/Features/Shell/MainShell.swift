@@ -1,13 +1,12 @@
 import SwiftUI
-import UIKit
 
 /// The signed-in app.
 ///
-/// Navigation always lives on the right edge, as three separate liquid-glass
-/// buttons: Apps, Profile and Search. Where the system provides its vertical bar
-/// on the right, the buttons sit inside that space; anywhere it doesn't (for
-/// example in landscape), Duova keeps an equivalent strip on the right so the
-/// buttons never move. Nothing sits on the content itself.
+/// The Apps page is full screen. Its title row carries the navigation on the
+/// right: Apps, Profile and Search as three separate liquid-glass buttons. The
+/// row keeps clear of the status bar wherever the system puts it, so the
+/// buttons sit in the top-right corner when the status bar runs along the top,
+/// and just inside it when the status bar runs down the right edge.
 ///
 /// Profile isn't a separate screen. Choosing it slides a panel in from the right
 /// over the apps, which go inactive underneath; tap them or swipe the panel away
@@ -18,69 +17,71 @@ import UIKit
 struct MainShell: View {
     @Environment(\.duovaTheme) private var theme
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    @Environment(\.bookPosture) private var book
+
+    @State private var showsSplitter: Bool
+
+    init(startInSplitter: Bool = false) {
+        _showsSplitter = State(initialValue: startInSplitter)
+    }
 
     @State private var query = ""
     @State private var searching = false
     @State private var showsProfile = false
     @State private var profileAtRoot = true
-    @State private var systemBarOnTrailing = false
-    @State private var cameraOnTrailing = false
-    @State private var trailingInset: CGFloat = 0
     @FocusState private var searchFocused: Bool
     @GestureState(resetTransaction: Transaction(animation: .spring(response: 0.3, dampingFraction: 0.85)))
     private var dragOffset: CGFloat = 0
 
-    /// Width of Duova's own strip when the system has no vertical bar on the right.
-    private let stripWidth: CGFloat = 68
-
-    /// The system's vertical bar is on the right and has room for the buttons.
-    private var usesSystemBar: Bool { systemBarOnTrailing && trailingInset >= 44 }
-
-    /// How far the navigation reaches in from the right edge of the screen.
-    private var navigationAreaWidth: CGFloat {
-        usesSystemBar ? trailingInset : trailingInset + stripWidth
-    }
-
     var body: some View {
-        // The apps stay full screen; the navigation floats over their right edge.
-        LibraryView(query: $query)
-            .environment(\.navigationAreaWidth, navigationAreaWidth)
-            .safeAreaInset(edge: .bottom, spacing: 0) {
-                if searching { searchField }
-            }
-            .onGeometryChange(for: CGFloat.self, of: { $0.safeAreaInsets.trailing }) { trailingInset = $0 }
-            .overlay {
-                if usesSystemBar {
-                    navigation
-                        .frame(width: trailingInset)
-                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .trailing)
-                        .ignoresSafeArea(.container, edges: .trailing)
-                } else {
-                    navigation
-                        .frame(width: stripWidth)
-                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .trailing)
+        Group {
+            if showsSplitter {
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 24) {
+                        titleRow
+                        SplitterView()
+                    }
+                    .padding(20)
                 }
+            } else {
+                LibraryView(query: $query) { titleRow }
             }
-            .overlay { profilePanel }
-            .onPreferenceChange(ProfileAtRootKey.self) { profileAtRoot = $0 }
-            .background {
-                ScreenEdgeReader { reading in
-                    systemBarOnTrailing = reading.barOnTrailing
-                    cameraOnTrailing = reading.cameraOnTrailing
-                }
-                .allowsHitTesting(false)
-            }
+        }
+        .overlay { profilePanel }
+        .onPreferenceChange(ProfileAtRootKey.self) { profileAtRoot = $0 }
     }
 
-    // MARK: Navigation
+    // MARK: Title row
 
-    /// Three separate glass buttons, stacked at the bottom of the right edge.
+    /// "Apps" (or the search field while searching) with the navigation beside it.
+    private var titleRow: some View {
+        HStack(spacing: 8) {
+            if searching {
+                searchField
+                    .transition(.opacity.combined(with: .scale(scale: 0.96, anchor: .trailing)))
+            } else {
+                Text(showsSplitter ? "Splitter" : "Apps")
+                    .font(.largeTitle.bold())
+                    .foregroundStyle(theme.textPrimary)
+                    .accessibilityAddTraits(.isHeader)
+                    .transition(.opacity)
+                Spacer(minLength: 0)
+            }
+            navigation
+        }
+        .frame(minHeight: 52)
+    }
+
+    /// Three separate glass buttons.
     private var navigation: some View {
-        VStack(spacing: 10) {
-            Spacer(minLength: 0)
-            navButton("square.grid.2x2.fill", label: "Apps", isActive: !searching && !showsProfile) {
+        HStack(spacing: 6) {
+            navButton("square.grid.2x2.fill", label: "Apps", isActive: !showsSplitter && !searching && !showsProfile) {
                 endSearch()
+                showsSplitter = false
+                setProfile(shown: false)
+            }
+            navButton("rectangle.split.2x1", label: "Splitter", isActive: showsSplitter && !showsProfile) {
+                endSearch()
+                showsSplitter = true
                 setProfile(shown: false)
             }
             navButton("person.crop.circle.fill", label: "Profile", isActive: showsProfile) {
@@ -91,10 +92,6 @@ struct MainShell: View {
                 if searching { endSearch() } else { beginSearch() }
             }
         }
-        // A closed device turned clockwise has its front camera on the right,
-        // beside the lowest button, so the buttons sit higher there.
-        .padding(.bottom, book == nil && cameraOnTrailing ? 30 : 8)
-        .frame(maxWidth: .infinity)
     }
 
     private func navButton(
@@ -102,10 +99,10 @@ struct MainShell: View {
     ) -> some View {
         Button(action: action) {
             Image(systemName: symbol)
-                .font(.system(size: 19, weight: .semibold))
+                .font(.system(size: 18, weight: .semibold))
                 .foregroundStyle(isActive ? theme.accent : theme.textPrimary)
                 .contentTransition(.symbolEffect(.replace))
-                .frame(width: 48, height: 48)
+                .frame(width: 46, height: 46)
                 .contentShape(Circle())
         }
         .buttonStyle(.plain)
@@ -119,7 +116,7 @@ struct MainShell: View {
 
     // MARK: Search
 
-    /// Shown only while searching, at the bottom of the apps, beside the Search button.
+    /// Takes the title's place while searching, so the keyboard never covers it.
     private var searchField: some View {
         HStack(spacing: 8) {
             Image(systemName: "magnifyingglass")
@@ -140,7 +137,7 @@ struct MainShell: View {
                 } label: {
                     Image(systemName: "xmark.circle.fill")
                         .foregroundStyle(theme.textSecondary)
-                        .frame(width: 44, height: 44)
+                        .frame(width: 40, height: 40)
                         .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
@@ -148,18 +145,13 @@ struct MainShell: View {
             }
         }
         .padding(.leading, 16)
-        .padding(.trailing, query.isEmpty ? 16 : 6)
-        .frame(height: 52)
+        .padding(.trailing, query.isEmpty ? 16 : 4)
+        .frame(height: 46)
         .glassEffect(.regular.interactive(), in: Capsule())
-        .padding(.leading, DuovaMetrics.screenMargin)
-        // Stops beside the navigation buttons rather than under them.
-        .padding(.trailing, usesSystemBar ? DuovaMetrics.screenMargin : stripWidth)
-        .padding(.top, 6)
-        .padding(.bottom, 8)
-        .transition(.move(edge: .bottom).combined(with: .opacity))
     }
 
     private func beginSearch() {
+        showsSplitter = false
         setProfile(shown: false)
         withAnimation(reduceMotion ? nil : .spring(response: 0.35, dampingFraction: 0.9)) {
             searching = true
@@ -181,7 +173,7 @@ struct MainShell: View {
 
     // MARK: Profile panel
 
-    /// Runs to the very right edge of the screen, over the navigation, like the apps do.
+    /// Runs to the very right edge of the screen, like the apps do.
     private var profilePanel: some View {
         GeometryReader { geo in
             ZStack(alignment: .trailing) {
@@ -238,81 +230,11 @@ struct MainShell: View {
     }
 }
 
-extension EnvironmentValues {
-    /// How far Duova's navigation buttons reach in from the right edge of the
-    /// screen, so full-screen content can keep its own controls clear of them.
-    @Entry var navigationAreaWidth: CGFloat = 0
-}
-
 /// Whether Profile is showing its first page, so swiping the panel away
 /// never fights the navigation back-swipe on a deeper page.
 struct ProfileAtRootKey: PreferenceKey {
     static let defaultValue = true
     static func reduce(value: inout Bool, nextValue: () -> Bool) {
         value = value && nextValue()
-    }
-}
-
-/// Reports what sits on the right edge of the screen: the system's vertical
-/// bar, and (in landscape) the front camera.
-private struct ScreenEdgeReader: UIViewRepresentable {
-    struct Reading: Equatable {
-        var barOnTrailing = false
-        var cameraOnTrailing = false
-    }
-
-    let onChange: (Reading) -> Void
-
-    func makeUIView(context: Context) -> ReaderView {
-        let view = ReaderView()
-        view.onChange = onChange
-        return view
-    }
-
-    func updateUIView(_ uiView: ReaderView, context: Context) {
-        uiView.onChange = onChange
-    }
-
-    final class ReaderView: UIView {
-        var onChange: ((Reading) -> Void)?
-        private var last: Reading?
-
-        override init(frame: CGRect) {
-            super.init(frame: frame)
-            isUserInteractionEnabled = false
-            backgroundColor = .clear
-            if #available(iOS 27.1, *) {
-                registerForTraitChanges(UITraitCollection.systemTraitsAffectingVerticalBarEdge) { (view: ReaderView, _) in
-                    view.report()
-                }
-            }
-        }
-
-        required init?(coder: NSCoder) { nil }
-
-        override func didMoveToWindow() {
-            super.didMoveToWindow()
-            report()
-        }
-
-        /// Rotation resizes this view, so a new layout is when to check the orientation.
-        override func layoutSubviews() {
-            super.layoutSubviews()
-            report()
-        }
-
-        private func report() {
-            var reading = Reading()
-            if #available(iOS 27.1, *) {
-                reading.barOnTrailing = traitCollection.verticalBarEdge == .trailing
-            }
-            // Turned clockwise, the top of the device (and its front camera)
-            // is on the right; iOS calls that interface orientation landscapeLeft.
-            reading.cameraOnTrailing = window?.windowScene?.effectiveGeometry.interfaceOrientation == .landscapeLeft
-            guard reading != last else { return }
-            last = reading
-            // Never change SwiftUI state in the middle of a layout pass.
-            DispatchQueue.main.async { [onChange] in onChange?(reading) }
-        }
     }
 }

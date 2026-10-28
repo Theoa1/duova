@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>DUOVA_SUPABASE_URL</key>
+	<string>https://$(DUOVA_SUPABASE_HOST)</string>
+	<key>DUOVA_SUPABASE_PUBLISHABLE_KEY</key>
+	<string>$(DUOVA_SUPABASE_PUBLISHABLE_KEY)</string>
+	<key>NSCameraUsageDescription</key>
+	<string>A service you open in Duova may ask to use the camera, for example to take a photo or video to post.</string>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>A service you open in Duova may ask to use the microphone, for example to record a video or a voice message.</string>
+	<key>NSPhotoLibraryUsageDescription</key>
+	<string>A service you open in Duova may ask to use your photos when you choose one to share.</string>
+</dict>
+</plist>

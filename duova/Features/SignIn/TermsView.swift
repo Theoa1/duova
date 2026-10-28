@@ -3,18 +3,9 @@ import SwiftUI
 /// Duova's Terms of Use, shown in-app. Each point describes how the app
 /// actually behaves today.
 struct TermsView: View {
-    @Environment(\.closeSheet) private var closeSheet
-
     var body: some View {
-        NavigationStack {
-            SettingsPage(title: "Terms of Use") {
-                TermsSections()
-            }
-            .toolbar {
-                ToolbarItem(placement: .confirmationAction) {
-                    Button("Done") { closeSheet() }
-                }
-            }
+        SettingsPage(title: "Terms of Use", showsTitle: true) {
+            TermsSections()
         }
     }
 }

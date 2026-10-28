@@ -42,8 +42,10 @@ struct PersonalInformationPage: View {
 struct SignInSecurityPage: View {
     @Environment(AuthController.self) private var auth
     @State private var showChangePassword = false
+    @State private var showCreatePassword = false
     @State private var message: String?
     @State private var isUpdating = false
+    @State private var passkeyToRemove: CloudPasskey?
 
     private var kind: BiometricKind { auth.biometricKind }
 
@@ -65,7 +67,41 @@ struct SignInSecurityPage: View {
                 } else {
                     SettingsValueRow(
                         title: "Signs in with",
-                        value: auth.account?.appleUserID != nil ? String(localized: "Apple") : String(localized: "Passkey"))
+                        value: auth.account?.appleUserID != nil
+                            ? String(localized: "Apple")
+                            : (!auth.cloudPasskeys.isEmpty || !auth.usesCloud
+                               ? String(localized: "Passkey") : String(localized: "Email code")))
+                    if auth.usesCloud, auth.account?.email.isEmpty == false {
+                        SettingsButtonRow(symbol: "key.fill", title: "Create Password") {
+                            showCreatePassword = true
+                        }
+                    }
+                }
+            }
+
+            if auth.usesCloud {
+                DevicesGroup()
+            }
+
+            if auth.usesCloud && auth.capabilities.passkeys {
+                SettingsGroup(
+                    title: "Passkeys",
+                    footer: auth.cloudPasskeys.isEmpty
+                        ? "Add a passkey to sign in with \(kind.title) instead of typing your password. Passkeys are stored by your device and iCloud Keychain; Duova never sees them."
+                        : "You can sign in with any of these on the sign-in screen."
+                ) {
+                    ForEach(auth.cloudPasskeys) { passkey in
+                        SettingsButtonRow(
+                            symbol: "person.badge.key.fill",
+                            title: "Remove \(passkey.name)", isDestructive: true
+                        ) {
+                            passkeyToRemove = passkey
+                        }
+                    }
+                    SettingsButtonRow(symbol: "plus.circle.fill", title: "Add a Passkey") {
+                        addPasskey()
+                    }
+                    .disabled(isUpdating)
                 }
             }
 
@@ -122,6 +158,44 @@ struct SignInSecurityPage: View {
             }
         }
         .pageSheet(isPresented: $showChangePassword) { ChangePasswordView() }
+        .pageSheet(isPresented: $showCreatePassword) { CreatePasswordView() }
+        .confirmationDialog(
+            "Remove this passkey?", isPresented: Binding(
+                get: { passkeyToRemove != nil }, set: { if !$0 { passkeyToRemove = nil } }),
+            titleVisibility: .visible
+        ) {
+            Button("Remove Passkey", role: .destructive) {
+                if let passkey = passkeyToRemove { removePasskey(passkey) }
+                passkeyToRemove = nil
+            }
+        } message: {
+            Text("You won't be able to sign in with it any more. Your other sign-in methods keep working.")
+        }
+        .task { await auth.refreshPasskeys() }
+    }
+
+    private func addPasskey() {
+        isUpdating = true
+        message = nil
+        Task {
+            defer { isUpdating = false }
+            do { try await auth.addPasskey() } catch is CancellationError {} catch {
+                message = (error as? AuthError)?.errorDescription
+                    ?? String(localized: "Passkey not added. Retry.")
+            }
+        }
+    }
+
+    private func removePasskey(_ passkey: CloudPasskey) {
+        isUpdating = true
+        message = nil
+        Task {
+            defer { isUpdating = false }
+            do { try await auth.removePasskey(passkey.id) } catch {
+                message = (error as? AuthError)?.errorDescription
+                    ?? String(localized: "Passkey not removed. Retry.")
+            }
+        }
     }
 
     private func setAppLock(_ enabled: Bool) {
@@ -133,7 +207,7 @@ struct SignInSecurityPage: View {
             case .success, .cancelled:
                 break
             case .unavailable:
-                message = String(localized: "\(kind.title) isn't available. Set it up in Settings first.")
+                message = String(localized: "Set up \(kind.title) in Settings.")
             case .failed(let reason):
                 message = reason
             }
@@ -166,9 +240,13 @@ struct SessionsPage: View {
 
             SettingsGroup(
                 title: "Other devices",
-                footer: "Your Duova account is stored encrypted on this device only, so there are no other active sessions to review or revoke."
+                footer: auth.usesCloud
+                    ? "Signing out here ends this device's session only. Other devices stay signed in until you sign out on them."
+                    : "Your Duova account is stored encrypted on this device only, so there are no other active sessions to review or revoke."
             ) {
-                SettingsValueRow(title: "Active sessions", value: String(localized: "None"))
+                SettingsValueRow(
+                    title: "Active sessions",
+                    value: auth.usesCloud ? String(localized: "Not listed yet") : String(localized: "None"))
             }
 
             SettingsGroup(footer: "You'll need your email and password to sign in again.") {
