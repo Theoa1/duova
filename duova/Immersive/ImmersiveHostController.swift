@@ -10,9 +10,11 @@ final class ImmersiveHostController: UIViewController {
     var onSuspend: () -> Bool = { false }
     private lazy var navigation = UIHostingController(rootView: InstagramNavigationBar(coordinator: coordinator))
     private lazy var companionNavigation = UIHostingController(rootView: CompanionNavigation(coordinator: coordinator))
+    private lazy var status = UIHostingController(rootView: ImmersiveStatusView(coordinator: coordinator))
     private let companionPlaceholder = UILabel()
     private var lastInput: PostureInput?
     private var dismissalSnapshot: UIView?
+    private var hiddenForDismissal: [UIView] = []
     private var dismissalOrigin = CGPoint.zero
     private var dismissalDistance: CGFloat = 0
     private var finishingDismissal = false
@@ -49,6 +51,8 @@ final class ImmersiveHostController: UIViewController {
         attach(coordinator.primary.webView)
         install(navigation)
         install(companionNavigation)
+        install(status)
+        status.view.isHidden = coordinator.phase == .ready
         companionPlaceholder.text = "Choose content above, or tap comments on a post or Reel."
         companionPlaceholder.font = .preferredFont(forTextStyle: .subheadline)
         companionPlaceholder.adjustsFontForContentSizeCategory = true
@@ -156,6 +160,7 @@ final class ImmersiveHostController: UIViewController {
 
     /// Positions the same web views; never creates or reloads one.
     private func applyLayout() {
+        guard dismissalSnapshot == nil, !finishingDismissal else { return }
         var input = PostureInput(size: view.bounds.size)
         let insets = view.safeAreaInsets
         input.safeTop = insets.top
@@ -188,51 +193,64 @@ final class ImmersiveHostController: UIViewController {
         coordinator.companionAvailable = resolved.canShowCompanion
 
         let safe = view.bounds.inset(by: insets)
-        let primaryFrame = resolved.primary.intersection(safe).insetBy(dx: 4, dy: 4)
+        let primaryFrame = resolved.primary
+        let controlsFrame = primaryFrame.intersection(safe)
         let barHeight: CGFloat = 64
-        let barWidth = min(360, max(0, primaryFrame.width - 16))
-        navigation.view.frame = CGRect(x: primaryFrame.midX - barWidth / 2,
-                                       y: primaryFrame.maxY - barHeight,
+        let barWidth = min(360, max(0, controlsFrame.width - 16))
+        navigation.view.frame = CGRect(x: controlsFrame.midX - barWidth / 2,
+                                       y: controlsFrame.maxY - barHeight,
                                        width: barWidth, height: barHeight)
         let pageFrame = CGRect(x: primaryFrame.minX, y: primaryFrame.minY,
                                width: max(0, primaryFrame.width),
-                               height: max(0, primaryFrame.height - barHeight - 4))
+                               height: max(0, primaryFrame.height))
         let primary = coordinator.primary
         if primary.webView.frame != pageFrame { primary.webView.frame = pageFrame }
         primary.layoutWidth = pageFrame.width
-        primary.setContentVisible(true)
+        let contentInsets = UIEdgeInsets(top: 0, left: 0, bottom: insets.bottom + barHeight + 4, right: 0)
+        if primary.webView.scrollView.contentInset != contentInsets {
+            primary.webView.scrollView.contentInset = contentInsets
+        }
+        primary.setContentVisible(isVisible && view.window?.windowScene?.activationState == .foregroundActive)
         coordinator.paneDidBecomeVisible(primary)
 
         companionNavigation.view.isHidden = resolved.companion == nil
-        companionPlaceholder.isHidden = resolved.companion == nil || coordinator.companion != nil
+        companionPlaceholder.isHidden = resolved.companion == nil || coordinator.companionStatus == nil
+        companionPlaceholder.text = coordinator.companionStatus
         if let frame = resolved.companion {
-            let contained = frame.intersection(safe).insetBy(dx: 4, dy: 4)
+            let contained = frame.intersection(safe)
             companionNavigation.view.frame = CGRect(x: contained.minX, y: contained.minY,
                                                     width: contained.width, height: 52)
-            let content = CGRect(x: contained.minX, y: contained.minY + 56,
-                                 width: contained.width, height: max(0, contained.height - 56))
+            let content = frame
             companionPlaceholder.frame = content.insetBy(dx: 24, dy: 20)
             if let companion = coordinator.companion {
                 if companion.webView.superview !== view { attach(companion.webView) }
                 companion.webView.isHidden = false
-                companion.setContentVisible(true)
+                companion.setContentVisible(isVisible && coordinator.companionKind != .comments &&
+                    view.window?.windowScene?.activationState == .foregroundActive)
                 if companion.webView.frame != content { companion.webView.frame = content }
                 companion.layoutWidth = content.width
+                let companionInsets = UIEdgeInsets(top: insets.top + 56, left: 0, bottom: insets.bottom, right: 0)
+                if companion.webView.scrollView.contentInset != companionInsets {
+                    companion.webView.scrollView.contentInset = companionInsets
+                }
                 coordinator.paneDidBecomeVisible(companion)
             }
         } else {
             coordinator.companion?.webView.isHidden = true
             coordinator.companion?.setContentVisible(false)
         }
+        view.bringSubviewToFront(companionPlaceholder)
         view.bringSubviewToFront(navigation.view)
         view.bringSubviewToFront(companionNavigation.view)
+        status.view.frame = view.bounds
+        view.bringSubviewToFront(status.view)
         // The first navigation must see real pane dimensions, not a zero-sized web view.
         if view.bounds.width > 0 && view.bounds.height > 0 { coordinator.start() }
     }
 
     private func attach(_ webView: WKWebView) {
         webView.clipsToBounds = true
-        webView.layer.cornerRadius = 14
+        webView.layer.cornerRadius = 0
         webView.scrollView.contentInsetAdjustmentBehavior = .never
         webView.autoresizingMask = []
         webView.translatesAutoresizingMaskIntoConstraints = true
@@ -241,6 +259,7 @@ final class ImmersiveHostController: UIViewController {
 
     /// Re-run layout when the companion gains or loses content.
     func companionDidChange() {
+        if dismissalSnapshot == nil { status.view.isHidden = coordinator.phase == .ready }
         lastInput = nil
         view.setNeedsLayout()
     }
@@ -260,13 +279,16 @@ final class ImmersiveHostController: UIViewController {
         guard !finishingDismissal else { return }
         switch gesture.state {
         case .began:
-            guard let snapshot = view.snapshotView(afterScreenUpdates: false) else { return }
+            guard gesture.numberOfTouches == 3,
+                  let snapshot = view.snapshotView(afterScreenUpdates: false) else { return }
             dismissalOrigin = gesture.location(in: view)
             dismissalDistance = 0
             snapshot.frame = view.bounds
             snapshot.isUserInteractionEnabled = false
             snapshot.layer.cornerRadius = 24
             snapshot.clipsToBounds = true
+            hiddenForDismissal = view.subviews.filter { !$0.isHidden }
+            hiddenForDismissal.forEach { $0.isHidden = true }
             dismissalSnapshot = snapshot
             view.addSubview(snapshot)
             UIImpactFeedbackGenerator(style: .medium).impactOccurred()
@@ -318,6 +340,11 @@ final class ImmersiveHostController: UIViewController {
     private func cancelDismissal() {
         guard let snapshot = dismissalSnapshot else { return }
         dismissalSnapshot = nil
+        hiddenForDismissal.forEach { $0.isHidden = false }
+        hiddenForDismissal.removeAll()
+        status.view.isHidden = coordinator.phase == .ready
+        lastInput = nil
+        view.setNeedsLayout()
         if UIAccessibility.isReduceMotionEnabled { snapshot.removeFromSuperview(); return }
         UIView.animate(withDuration: 0.18, animations: { snapshot.transform = .identity },
                        completion: { _ in snapshot.removeFromSuperview() })

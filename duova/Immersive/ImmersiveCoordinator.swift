@@ -32,7 +32,10 @@ final class ImmersiveCoordinator {
     let primary: SocialPane
     private(set) var companion: SocialPane?
     private(set) var companionKind: CompanionKind?
+    private(set) var companionStatus: String? = "Comments appear here when you open a post or Reel. You can also choose Messages or Explore above."
     private(set) var phase: Phase = .loading
+    private(set) var primaryRoute = "/"
+    var navigationNotice: String?
     /// Something to show in the companion pane when geometry allows.
     var companionWanted: Bool { companion != nil && companionKind != nil }
     private(set) var lastOutcome: RestoreOutcome?
@@ -140,9 +143,11 @@ final class ImmersiveCoordinator {
             observeScroll(of: pane)
             companion = pane
         }
+        let kind = kind == .post ? CompanionKind.comments : kind
         companionKind = kind
         companionPresentationTask?.cancel()
         if pane.lastError != nil || pane.webView.url?.path != url.path || pane.webView.url?.host() != url.host() {
+            companionStatus = "Preparing " + kind.rawValue + "…"
             pane.load(url)
         }
         if !pane.webView.isLoading && remember { presentCompanionContext(pane) }
@@ -164,11 +169,38 @@ final class ImmersiveCoordinator {
                 if await pane.evaluate(self.adapter.companionPresentationScript(for: companionKind)) as? Bool == true { return }
                 try? await Task.sleep(for: .milliseconds(400))
             }
-            // Unknown markup remains the unmodified real post, including its own controls.
+            self.companionStatus = "Instagram hasn’t made this component available yet. Choose Reload from the menu to try again."
         }
     }
 
     /// Native navigation changes only the primary page.
+    func openOwnProfile() {
+        Task { [weak self] in
+            guard let self, adapter.isSiteHost(primary.webView.url) else { return }
+            let generation = primary.navigationGeneration
+            let script = """
+            (() => {
+              for (const a of document.querySelectorAll('[data-duova-native-navigation] a[href]')) {
+                const label = ((a.getAttribute('aria-label') || '') + ' ' + a.textContent).toLowerCase();
+                const image = a.querySelector('img');
+                if (!/profile|perfil|profil/.test(label) && !image) continue;
+                const u = new URL(a.href, location.href);
+                if (u.origin === location.origin) return u.pathname;
+              }
+              return null;
+            })()
+            """
+            let path = await primary.evaluate(script) as? String
+            guard generation == primary.navigationGeneration else { return }
+            if let path, let url = adapter.url(forCheckpointRoute: path),
+               adapter.companionKind(for: url, from: nil) == .profile {
+                navigatePrimary(path)
+            } else {
+                navigationNotice = "Instagram hasn’t exposed a profile link on this page yet."
+            }
+        }
+    }
+
     func navigatePrimary(_ path: String) {
         guard let url = adapter.url(forCheckpointRoute: path) else { return }
         pendingRestore = nil
@@ -190,10 +222,18 @@ final class ImmersiveCoordinator {
                 let url = anchor.flatMap { adapter.url(forCheckpointRoute: $0) } ?? primary.webView.url
                 if let url, adapter.acceptsCompanion(.comments, url: url) {
                     openInCompanion(url, kind: .comments)
+                } else {
+                    navigationNotice = "Open a post or Reel, then choose Comments. You can also tap its comment button."
                 }
             }
         default: break
         }
+    }
+
+    func retryCompanion() {
+        guard let companion else { return }
+        companionStatus = "Reloading…"
+        companion.retry()
     }
 
     func updateSplitRatio(_ ratio: PanelRatio) {
@@ -340,6 +380,8 @@ final class ImmersiveCoordinator {
 
     func setSceneActive(_ active: Bool) {
         sceneActive = active
+        primary.setContentVisible(active)
+        companion?.setContentVisible(active && companionAvailable && companionKind != .comments)
         preloader.enabled = active && networkAllowsPreload
         if !active { saveCheckpointNow() }
     }
@@ -401,7 +443,33 @@ final class ImmersiveCoordinator {
 // MARK: - Pane events
 
 extension ImmersiveCoordinator: SocialPaneDelegate {
+    private func updateNavigationState(_ pane: SocialPane) {
+        guard let url = pane.webView.url, adapter.isSiteHost(url) else { return }
+        if pane === primary {
+            let path = adapter.checkpointRoute(for: url) ?? "/"
+            if primaryRoute != path {
+                primaryRoute = path
+                if companionAvailable, adapter.acceptsCompanion(.comments, url: url) {
+                    openInCompanion(url, kind: .comments)
+                }
+            }
+        } else if let kind = adapter.companionKind(for: url, from: nil) {
+            if !(kind == .post && companionKind == .comments), companionKind != kind { companionKind = kind }
+        }
+    }
+
+    func paneRequestsCurrentComments(_ pane: SocialPane) {
+        guard pane === primary, companionAvailable else { return }
+        selectCompanion(.comments)
+    }
+
+    func pane(_ pane: SocialPane, componentReady: Bool) {
+        guard pane !== primary else { return }
+        companionStatus = componentReady ? nil : "Preparing " + (companionKind?.rawValue ?? "content") + "…"
+    }
+
     func paneStateDidChange(_ pane: SocialPane) {
+        updateNavigationState(pane)
         if pane === primary && pendingRestore != nil || pane !== primary && pendingCompanionRestore != nil {
             if restoreTasks[ObjectIdentifier(pane)] == nil { beginRestore(for: pane) }
         }
@@ -414,6 +482,7 @@ extension ImmersiveCoordinator: SocialPaneDelegate {
     }
 
     func pane(_ pane: SocialPane, didCommit url: URL?) {
+        updateNavigationState(pane)
         preloader.cancel()
         if pane === primary {
             phase = .ready
@@ -434,6 +503,7 @@ extension ImmersiveCoordinator: SocialPaneDelegate {
         guard pane === primary else {
             // Keep the anchored feed usable. A failed context can be retried by
             // selecting its original website control again.
+            companionStatus = isOnline ? "This component couldn’t be loaded. Choose Reload to try again." : "Offline. Choose Reload when you’re connected."
             record(isOnline ? .unavailable : .offline)
             return
         }
@@ -464,7 +534,12 @@ extension ImmersiveCoordinator: SocialPaneDelegate {
 
     func pane(_ pane: SocialPane, requestsCompanion url: URL, kind: CompanionKind) {
         guard companionAvailable else { return }
-        openInCompanion(url, kind: kind)
+        if kind == .post {
+            navigatePrimary(url.path)
+            openInCompanion(url, kind: .comments)
+        } else {
+            openInCompanion(url, kind: kind)
+        }
     }
 
     /// Set by the compositor from current geometry; tells the primary whether

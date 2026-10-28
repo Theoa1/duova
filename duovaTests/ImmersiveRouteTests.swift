@@ -59,7 +59,28 @@ struct ImmersiveRouteTests {
         }
     }
 
-    @Test func debugResetIsTheOnlyWayBack() {
+    @Test func parkingSurvivesRelaunchAndResume() {
+        let store = makeStore()
+        let account = UUID()
+        let route = DuovaLaunchRouteStore(accountID: account, store: store)
+        #expect(!route.park())
+        #expect(route.commit(.instagram))
+        #expect(route.park())
+        #expect(route.route(for: account) == .splitter)
+        #expect(route.committedService == .instagram)
+        let restored = DuovaLaunchRouteStore(accountID: account, store: store)
+        #expect(restored.route(for: account) == .splitter)
+        #expect(restored.savedAt != nil)
+        #expect(restored.commit(.instagram))
+        #expect(restored.route(for: account) == .immersive(.instagram))
+        #expect(!restored.isParked)
+        restored.activate(accountID: UUID())
+        #expect(restored.committedService == nil)
+        #expect(restored.savedAt == nil)
+        #expect(!restored.isParked)
+    }
+
+    @Test func debugResetClearsTheWorkspace() {
         let account = UUID()
         let route = DuovaLaunchRouteStore(accountID: account, store: makeStore())
         #expect(route.commit(.instagram))

@@ -93,8 +93,7 @@ final class DuovaLaunchRouteStore {
     }
 
     #if DEBUG
-    /// Test builds only: forgets the launch so the library shows again. There
-    /// is deliberately no production path to this.
+    /// Test builds only: removes the launch record. Parking preserves it instead.
     func resetForTesting() {
         guard let accountID else { return }
         store.remove(name: Self.name(accountID))

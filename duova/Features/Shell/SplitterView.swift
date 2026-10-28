@@ -3,8 +3,19 @@ import SwiftUI
 /// The encrypted launch record is the source of truth, never placeholder workspaces.
 struct SplitterView: View {
     @Environment(DuovaLaunchRouteStore.self) private var route
+    @Environment(AuthController.self) private var auth
+    @State private var checkpoint: ImmersiveCheckpoint?
     @Environment(\.duovaTheme) private var theme
     @State private var resumeFailed = false
+
+    private func pageName(_ path: String) -> String {
+        if path == "/" { return "Feed" }
+        if path.hasPrefix("/reel") { return "Reels" }
+        if path.hasPrefix("/direct/") { return "Messages" }
+        if path.hasPrefix("/explore/") { return "Explore" }
+        if path.hasPrefix("/p/") { return "Post" }
+        return "Profile"
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 24) {
@@ -17,16 +28,25 @@ struct SplitterView: View {
             if let service = route.committedService {
                 VStack(alignment: .leading, spacing: 18) {
                     HStack {
-                        Image(systemName: "rectangle.stack")
-                            .font(.title2)
-                            .foregroundStyle(theme.accent)
+                        ServiceIcon(id: service, size: 48)
                         Text(service.rawValue.capitalized).font(.title3.bold())
                         Spacer()
                         Text("Preserved").font(.caption.weight(.semibold))
                             .foregroundStyle(theme.accent)
                     }
                     Label("Private sign-in session", systemImage: "lock")
-                    Label("Page, scroll and companion checkpoint", systemImage: "rectangle.split.2x1")
+                    if let checkpoint {
+                        Label("Main: " + pageName(checkpoint.primaryRoute), systemImage: "rectangle")
+                        if let kind = checkpoint.companionKind {
+                            Label("Companion: " + kind.rawValue.capitalized, systemImage: "rectangle.split.2x1")
+                        }
+                        Label("Scroll positions saved", systemImage: "arrow.up.and.down")
+                        if !(checkpoint.primaryState?.media.isEmpty ?? true) {
+                            Label("Playback position saved", systemImage: "play.circle")
+                        }
+                    } else {
+                        Label("Live session retained", systemImage: "rectangle.stack")
+                    }
                     if let date = route.savedAt {
                         Text(date, format: .dateTime.month().day().hour().minute())
                             .font(.caption).foregroundStyle(theme.textSecondary)
@@ -53,6 +73,13 @@ struct SplitterView: View {
         }
         .frame(maxWidth: 680, alignment: .leading)
         .frame(maxWidth: .infinity, alignment: .leading)
+        .task(id: route.savedAt) {
+            guard let accountID = auth.account?.id, let service = route.committedService else {
+                checkpoint = nil
+                return
+            }
+            checkpoint = ImmersiveCheckpointStore().load(accountID: accountID, service: service)
+        }
         .alert("Couldn’t resume", isPresented: $resumeFailed) {
             Button("OK", role: .cancel) {}
         } message: { Text("The secure launch record could not be saved. Please try again.") }

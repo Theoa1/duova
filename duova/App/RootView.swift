@@ -127,7 +127,7 @@ struct RootView: View {
     }
 
     /// Creates the service's surfaces once when a launch is committed and keeps
-    /// them until the account changes. Nothing here ever goes the other way.
+    /// them across visits to Splitter until the account changes.
     private func syncImmersive(_ service: ServiceID?) {
         guard let service, let accountID = auth.account?.id else { return }
         if let immersive, immersive.service == service, immersive.accountID == accountID { return }

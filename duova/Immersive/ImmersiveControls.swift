@@ -10,6 +10,12 @@ struct InstagramNavigationBar: View {
             item("Explore", symbol: "magnifyingglass", path: "/explore/")
             item("Reels", symbol: "play.rectangle", path: "/reels/")
             item("Messages", symbol: "paperplane", path: "/direct/inbox/")
+            Button { coordinator.openOwnProfile() } label: {
+                Image(systemName: "person.crop.circle")
+                    .font(.system(size: 21, weight: .medium)).foregroundStyle(.primary)
+                    .frame(maxWidth: .infinity, minHeight: 44).contentShape(Rectangle())
+            }
+            .buttonStyle(.plain).accessibilityLabel("Profile")
         }
         .padding(6)
         .glassEffect(.regular.interactive(), in: Capsule())
@@ -19,7 +25,7 @@ struct InstagramNavigationBar: View {
     private func item(_ title: String, symbol: String, path: String) -> some View {
         Button { coordinator.navigatePrimary(path) } label: {
             Image(systemName: symbol)
-                .font(.system(size: 21, weight: .medium))
+                .font(.system(size: 21, weight: coordinator.primaryRoute == path ? .bold : .regular))
                 .foregroundStyle(.primary)
                 .frame(maxWidth: .infinity, minHeight: 44)
                 .contentShape(Rectangle())
@@ -50,6 +56,8 @@ struct CompanionNavigation: View {
                 }
                 Button("Messages", systemImage: "paperplane") { coordinator.selectCompanion(.messages) }
                 Button("Explore", systemImage: "magnifyingglass") { coordinator.selectCompanion(.explore) }
+                Button("Reload content", systemImage: "arrow.clockwise") { coordinator.retryCompanion() }
+                    .disabled(coordinator.companion == nil)
             } label: {
                 HStack(spacing: 6) {
                     Text(title).font(.subheadline.weight(.medium)).lineLimit(1)

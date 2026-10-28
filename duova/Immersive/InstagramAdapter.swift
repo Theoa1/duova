@@ -1,10 +1,10 @@
 import Foundation
 
 /// Versioned adaptations of Instagram's own routes and semantic controls.
-/// Unknown markup falls through to the website; no synthetic content or clicks.
+/// Native navigation and focused companion components around the site's live DOM.
 struct InstagramAdapter: SocialAdapter {
     let service = ServiceID.instagram
-    let version = 3
+    let version = 5
     // The mobile website owns all screens; wider panes adapt without a source switch.
     let prefersMobileContent = true
     let homeURL = URL(string: "https://www.instagram.com/")!
@@ -94,93 +94,12 @@ struct InstagramAdapter: SocialAdapter {
     }
 
     func companionPresentationScript(for kind: CompanionKind) -> String {
-        guard Self.injectionEnabled, kind == .comments else { return "true" }
-        return #"""
-        (() => {
-          if (!['www.instagram.com','instagram.com'].includes(location.host) ||
-              !/^\/(p|reel)\/[A-Za-z0-9_-]+\//.test(location.pathname)) return false;
-          const inputs = document.querySelectorAll('textarea[placeholder],textarea[aria-label]');
-          for (const input of inputs) {
-            const label = ((input.getAttribute('placeholder') || '') + ' ' +
-              (input.getAttribute('aria-label') || '')).toLowerCase();
-            if (!/comment|comentario|commentaire|kommentar|commento/.test(label)) continue;
-            const region = input.closest('section') || input.closest('form') || input;
-            // Reveal Instagram's existing comments region; never focus, type, click or submit.
-            region.scrollIntoView({block:'nearest'});
-            document.documentElement.dataset.duovaContext = 'comments';
-            return true;
-          }
-          return false;
-        })()
-        """#
+        guard Self.injectionEnabled else { return "true" }
+        return "window.__duovaPresentComponent ? window.__duovaPresentComponent() : false"
     }
 
-    // MARK: Injection (version 2)
-
-    var styleSheet: String? {
-        guard Self.injectionEnabled else { return nil }
-        return """
-        [data-duova-native-navigation] { display: none !important; }
-        /* Compact pages use Instagram's own mobile layout, navigation, dialogs,
-           keyboard handling and media sizes. Never resize every image (avatars
-           and story tiles are images too), or force nested dialogs to scroll. */
-        @media (min-width: 760px) {
-          html[data-duova-instagram="3"] main {
-            min-width: 0; box-sizing: border-box;
-          }
-          html[data-duova-instagram="3"] article {
-            box-sizing: border-box; min-width: 0;
-            max-width: min(100%, 680px); margin-inline: auto;
-          }
-        }
-        """
-    }
-
-
-    /// Recognize only the site's global navigation, never post actions, dialogs or forms.
-    /// Attribute writes are excluded from observation, preventing style feedback loops.
-    static let navigationScript = #"""
-    (() => {
-      if (window.__duovaNavigation || location.protocol !== 'https:' ||
-          !['www.instagram.com','instagram.com'].includes(location.host)) return;
-      window.__duovaNavigation = true;
-      let scheduled = false;
-      const update = () => {
-        scheduled = false;
-        if (/^\/(accounts|challenge|oauth|emails|session)(\/|$)/.test(location.pathname)) return;
-        const destinations = new Set(['/','/explore/','/reels/','/direct/inbox/']);
-        const paths = element => new Set(Array.from(element.querySelectorAll('a[href]')).flatMap(a => {
-          try { const u = new URL(a.href,location.href);
-            return u.origin === location.origin && destinations.has(u.pathname) ? [u.pathname] : [];
-          } catch (_) { return []; }
-        }));
-        for (const a of Array.from(document.querySelectorAll('a[href]')).slice(0,250)) {
-          let node = a.parentElement;
-          for (let depth = 0; node && depth < 7 && node !== document.body; depth++, node = node.parentElement) {
-            if (node.hasAttribute('data-duova-native-navigation')) break;
-            if (node.matches('main,article,form,[role="dialog"]') ||
-                node.querySelector('main,article,form,[role="dialog"]')) break;
-            if (paths(node).size < 3) continue;
-            const r = node.getBoundingClientRect();
-            if ((r.height <= 120 && r.width >= innerWidth * 0.5) ||
-                (r.width <= 280 && r.height >= innerHeight * 0.5)) {
-              node.setAttribute('data-duova-native-navigation','');
-              break;
-            }
-          }
-        }
-      };
-      const schedule = () => {
-        if (scheduled || document.hidden) return;
-        scheduled = true;
-        setTimeout(update,250);
-      };
-      const observer = new MutationObserver(schedule);
-      observer.observe(document.documentElement,{subtree:true,childList:true});
-      window.addEventListener('pageshow',schedule);
-      schedule();
-    })();
-    """#
+    var styleSheet: String? { Self.injectionEnabled ? InstagramPresentation.css : nil }
+    static var navigationScript: String { InstagramPresentation.script }
 
     var primaryScript: String {
         guard Self.injectionEnabled else { return "" }
@@ -215,30 +134,60 @@ struct InstagramAdapter: SocialAdapter {
             // Explicit semantic labels, never icon geometry or broad substring matching.
             return labels.some(s => /^(comment|comments|view comments|view all [0-9,.]+ comments|add a comment[.…]*)$/.test(s));
           };
+          const postURLNear = target => {
+            let node = target;
+            for (let depth=0; node && node !== document.body && depth<9; depth++,node=node.parentElement) {
+              if (node.matches('main,[role="main"]')) break;
+              const urls = Array.from(node.querySelectorAll('a[href*="/p/"],a[href*="/reel/"]'))
+                .map(a => safeURL(a.href)).filter(u => u && kind(u) === 'post');
+              const paths = new Set(urls.map(u => u.pathname));
+              if (paths.size === 1) return urls[0];
+            }
+            const current = safeURL(location.href);
+            return current && kind(current) === 'post' ? current : null;
+          };
           const context = target => {
             const control = target.closest('a[href],button,[role="button"]');
             if (!control) return null;
             if (commentAction(control)) {
-              const article = control.closest('article');
-              const link = article && article.querySelector('a[href*="/p/"],a[href*="/reel/"]');
-              const u = link ? safeURL(link.href) : safeURL(location.href);
+              const u = postURLNear(control);
               if (u && kind(u) === 'post') return {url:u,kind:'comments'};
               return null;
             }
             const a = control.closest('a[href]');
             const u = a && safeURL(a.href);
             const k = u && kind(u);
-            return k ? {url:u,kind:k} : null;
+            return k === 'post' ? {url:u,kind:'post'} : null;
           };
           document.addEventListener('click', e => {
             if (!e.isTrusted || !window.__duovaCompanion || e.button !== 0 ||
                 e.metaKey || e.ctrlKey || e.shiftKey || e.altKey || !(e.target instanceof Element)) return;
             const c = context(e.target);
-            if (!c) return;
+            if (!c) {
+              if (commentAction(e.target.closest('button,a,[role="button"]'))) {
+                try {
+                  window.webkit.messageHandlers.duova.postMessage({type:'currentComments'});
+                  e.preventDefault(); e.stopImmediatePropagation();
+                } catch (_) {}
+              }
+              return;
+            }
             try {
               window.webkit.messageHandlers.duova.postMessage({type:'open',path:c.url.pathname,kind:c.kind});
               e.preventDefault(); e.stopImmediatePropagation();
             } catch (_) { /* Leave the site's action intact when there is no bridge. */ }
+          }, true);
+          // Instagram may start a Reel through a card or its own SPA routing.
+          // A playing visible video requests its discussion without moving the feed.
+          let lastVideoPath = '';
+          document.addEventListener('play', e => {
+            if (!window.__duovaCompanion || !(e.target instanceof HTMLVideoElement)) return;
+            const r = e.target.getBoundingClientRect();
+            if (r.bottom <= 0 || r.top >= innerHeight) return;
+            const u = postURLNear(e.target);
+            if (!u || kind(u) !== 'post' || lastVideoPath === u.pathname) return;
+            lastVideoPath = u.pathname;
+            try { window.webkit.messageHandlers.duova.postMessage({type:'open',path:u.pathname,kind:'comments'}); } catch (_) {}
           }, true);
           let candidateTimer;
           const suggest = e => {

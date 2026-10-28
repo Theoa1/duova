@@ -7,31 +7,21 @@ import SwiftUI
 struct ImmersiveServiceHost: View {
     let coordinator: ImmersiveCoordinator
     var onSuspend: () -> Bool = { false }
+    @State private var suspensionFailed = false
 
     var body: some View {
-        ZStack {
-            ImmersiveHostRepresentable(coordinator: coordinator, onSuspend: onSuspend)
-                .ignoresSafeArea()
-
-            switch coordinator.phase {
-            case .loading:
-                Color(.systemBackground)
-                    .ignoresSafeArea()
-                    .overlay { ProgressView().controlSize(.large) }
-                    .transition(.opacity)
-            case .offline:
-                ServiceFallbackView(isOffline: true) { coordinator.retry() }
-                    .transition(.opacity)
-            case .unavailable:
-                ServiceFallbackView(isOffline: false) { coordinator.retry() }
-                    .transition(.opacity)
-            case .ready:
-                EmptyView()
-            }
-        }
-        .animation(.easeOut(duration: 0.25), value: coordinator.phase)
+        ImmersiveHostRepresentable(coordinator: coordinator, onSuspend: onSuspend)
+            .ignoresSafeArea()
         .accessibilityAction(named: "Return to Splitter") {
-            Task { await coordinator.captureCheckpoint(); _ = onSuspend() }
+            Task { await coordinator.captureCheckpoint(); suspensionFailed = !onSuspend() }
+        }
+        .alert("Workspace", isPresented: Binding(
+            get: { coordinator.navigationNotice != nil || suspensionFailed },
+            set: { if !$0 { coordinator.navigationNotice = nil; suspensionFailed = false } }
+        )) {
+            Button("OK", role: .cancel) { coordinator.navigationNotice = nil; suspensionFailed = false }
+        } message: {
+            Text(coordinator.navigationNotice ?? "Couldn’t save the workspace. Your current page is still open.")
         }
         .statusBarHidden(true)
         .persistentSystemOverlays(.hidden)
@@ -52,9 +42,29 @@ private struct ImmersiveHostRepresentable: UIViewControllerRepresentable {
     func updateUIViewController(_ controller: ImmersiveHostController, context: Context) {
         // Reading these here re-runs the update when the companion changes.
         _ = coordinator.companionWanted
+        _ = coordinator.companionStatus
         _ = coordinator.splitRatio
+        _ = coordinator.phase
         controller.onSuspend = onSuspend
         controller.companionDidChange()
+    }
+}
+
+
+struct ImmersiveStatusView: View {
+    let coordinator: ImmersiveCoordinator
+    var body: some View {
+        switch coordinator.phase {
+        case .loading:
+            Color(.systemBackground).ignoresSafeArea()
+                .overlay { ProgressView().controlSize(.large) }
+        case .offline:
+            ServiceFallbackView(isOffline: true) { coordinator.retry() }
+        case .unavailable:
+            ServiceFallbackView(isOffline: false) { coordinator.retry() }
+        case .ready:
+            EmptyView()
+        }
     }
 }
 

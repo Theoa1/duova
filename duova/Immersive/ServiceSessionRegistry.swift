@@ -67,8 +67,8 @@ enum SocialWebViewFactory {
                 source: "if (location.protocol === 'https:' && [\(hosts)].includes(location.host)) { \(SocialPageScripts.runtime) }",
                 injectionTime: .atDocumentEnd, forMainFrameOnly: true, in: contentWorld))
             if adapter.service == .instagram && InstagramAdapter.injectionEnabled {
-                controller.addUserScript(WKUserScript(source: InstagramAdapter.navigationScript,
-                    injectionTime: .atDocumentEnd, forMainFrameOnly: true, in: contentWorld))
+                controller.addUserScript(WKUserScript(source: "document.documentElement.dataset.duovaPane = '\(injectsScripts ? "primary" : "companion")';" + InstagramAdapter.navigationScript,
+                    injectionTime: .atDocumentStart, forMainFrameOnly: true, in: contentWorld))
             }
             if injectsScripts && !adapter.primaryScript.isEmpty {
                 controller.addUserScript(WKUserScript(
@@ -78,7 +78,7 @@ enum SocialWebViewFactory {
         }
 
         let webView = WKWebView(frame: .zero, configuration: configuration)
-        webView.allowsBackForwardNavigationGestures = true
+        webView.allowsBackForwardNavigationGestures = injectsScripts
         webView.allowsLinkPreview = false
         webView.scrollView.showsVerticalScrollIndicator = false
         webView.scrollView.showsHorizontalScrollIndicator = false
@@ -114,7 +114,7 @@ enum SocialWebViewFactory {
             }
             window.__duovaRefreshStyle();
           }
-          if (document.head) add();
+          if (document.documentElement) add();
           else document.addEventListener('DOMContentLoaded', add, {once:true});
         })();
         """

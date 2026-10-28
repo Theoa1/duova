@@ -9,7 +9,9 @@ protocol SocialPaneDelegate: AnyObject {
     func pane(_ pane: SocialPane, didFail error: Error)
     func paneProcessDidTerminate(_ pane: SocialPane)
     /// The site asked to open a route the adapter classifies as companion content.
+    func paneRequestsCurrentComments(_ pane: SocialPane)
     func paneStateDidChange(_ pane: SocialPane)
+    func pane(_ pane: SocialPane, componentReady: Bool)
     func pane(_ pane: SocialPane, suggestsPrefetch url: URL)
     func pane(_ pane: SocialPane, requestsCompanion url: URL, kind: CompanionKind)
 }
@@ -110,6 +112,18 @@ final class SocialPane: NSObject {
                   role == .primary, companionEnabled, adapter.acceptsCompanion(kind, url: url)
             else { return }
             delegate?.pane(self, requestsCompanion: url, kind: kind)
+        case "currentComments":
+            guard role == .primary, companionEnabled else { return }
+            delegate?.paneRequestsCurrentComments(self)
+        case "component":
+            guard role == .companion, let status = dictionary["status"] as? String,
+                  status == "ready" || status == "waiting" else { return }
+            delegate?.pane(self, componentReady: status == "ready")
+        case "focusPost":
+            guard role == .companion, let path = dictionary["path"] as? String,
+                  let url = SocialRoutes.url(path: path, on: adapter.homeURL),
+                  adapter.acceptsCompanion(.comments, url: url) else { return }
+            delegate?.pane(self, requestsCompanion: url, kind: .post)
         case "state":
             delegate?.paneStateDidChange(self)
         case "prefetch":
@@ -140,6 +154,7 @@ extension SocialPane: WKNavigationDelegate {
     func webView(
         _ webView: WKWebView, decidePolicyFor action: WKNavigationAction, preferences: WKWebpagePreferences
     ) async -> (WKNavigationActionPolicy, WKWebpagePreferences) {
+        if role == .companion && action.navigationType == .backForward { return (.cancel, preferences) }
         guard let url = action.request.url else { return (.cancel, preferences) }
         let scheme = url.scheme?.lowercased() ?? ""
 
